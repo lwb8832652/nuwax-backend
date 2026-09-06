@@ -40,6 +40,8 @@ public class ImChannelTestService {
                 return testDingtalkConnection(configData);
             } else if (channelEnum == ImChannelEnum.WEWORK) {
                 return testWeworkConnection(targetTypeEnum, configData);
+            } else if (channelEnum == ImChannelEnum.QQ) {
+                return testQqConnection(configData);
             } else {
                 return ImChannelConfigTestResponse.builder()
                         .success(false)
@@ -350,6 +352,79 @@ public class ImChannelTestService {
                     .message(e.getMessage())
                     .build();
         }
+    }
+
+    /**
+     * 测试 QQ 官方机器人配置连通性。
+     * 通过调用 /app/getAppAccessToken 换取 appAccessToken 来验证 AppID 与 AppSecret 是否有效。
+     */
+    private ImChannelConfigTestResponse testQqConnection(String configData) {
+        try {
+            JSONObject json = JSON.parseObject(configData);
+            if (json == null) {
+                return errorResponse("配置数据格式错误");
+            }
+
+            String appId = firstNonBlank(json.getString("botAppId"), json.getString("appId"));
+            String appSecret = firstNonBlank(json.getString("botToken"), json.getString("appSecret"));
+
+            if (StringUtils.isBlank(appId)) {
+                return errorResponse("AppID 不能为空");
+            }
+            if (StringUtils.isBlank(appSecret)) {
+                return errorResponse("AppSecret 不能为空");
+            }
+
+            try {
+                String url = "https://bots.qq.com/app/getAppAccessToken";
+                String requestBody = String.format("{\"appId\":\"%s\",\"clientSecret\":\"%s\"}", appId, appSecret);
+
+                RestTemplate restTemplate = new RestTemplate();
+                org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+                headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+
+                org.springframework.http.HttpEntity<String> entity =
+                        new org.springframework.http.HttpEntity<>(requestBody, headers);
+                ResponseEntity<String> response = restTemplate.postForEntity(url, entity, String.class);
+
+                if (response.getStatusCode().is2xxSuccessful()) {
+                    JSONObject resp = JSON.parseObject(response.getBody());
+                    String accessToken = resp != null ? resp.getString("access_token") : null;
+                    if (StringUtils.isNotBlank(accessToken)) {
+                        return ImChannelConfigTestResponse.builder()
+                                .success(true)
+                                .message("QQ 连通性测试成功")
+                                .detail("appId: " + appId)
+                                .build();
+                    }
+                    String errMsg = resp != null ? resp.getString("message") : null;
+                    return errorResponse("换取 appAccessToken 失败: " + (StringUtils.isNotBlank(errMsg) ? errMsg : response.getBody()));
+                }
+
+                return errorResponse("连接 QQ 服务器失败，HTTP状态码: " + response.getStatusCode());
+            } catch (Exception e) {
+                log.error("QQ API error", e);
+                return errorResponse("连接 QQ 服务器异常: " + e.getMessage());
+            }
+        } catch (Exception e) {
+            log.error("QQ connectivity test failed", e);
+            return ImChannelConfigTestResponse.builder()
+                    .success(false)
+                    .message(e.getMessage())
+                    .build();
+        }
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (StringUtils.isNotBlank(value)) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private ImChannelConfigTestResponse errorResponse(String message) {

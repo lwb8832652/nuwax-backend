@@ -7,6 +7,8 @@ import com.xspaceagi.im.application.ImChannelConfigApplicationService;
 import com.xspaceagi.im.application.dto.ImChannelConfigResponse;
 import com.xspaceagi.im.application.dto.ImChannelStatisticsResponse;
 import com.xspaceagi.im.infra.dao.enitity.ImChannelConfig;
+import com.xspaceagi.im.infra.enums.ImChannelEnum;
+import com.xspaceagi.im.qq.QqChannelService;
 import com.xspaceagi.im.web.dto.*;
 import com.xspaceagi.im.web.service.ImChannelTestService;
 import com.xspaceagi.im.web.util.ImDtoConvertor;
@@ -46,6 +48,8 @@ public class ImChannelController {
     private ImChannelConfigApplicationService imChannelConfigApplicationService;
     @Resource
     private ImChannelTestService imChannelTestService;
+    @Resource
+    private QqChannelService qqChannelService;
 
     @RequireResource(IM_CONFIG_QUERY_LIST)
     @PostMapping("/statistics")
@@ -139,6 +143,7 @@ public class ImChannelController {
         ImChannelConfig config = ImDtoConvertor.toEntity(request);
 
         imChannelConfigApplicationService.add(config);
+        reloadQqChannelIfNeeded(request.getChannel());
         return ReqResult.success(null);
     }
 
@@ -159,6 +164,8 @@ public class ImChannelController {
         ImChannelConfig newConfig = ImDtoConvertor.toEntity(request);
 
         imChannelConfigApplicationService.update(newConfig, exist);
+        reloadQqChannelIfNeeded(
+                request.getChannel() != null ? request.getChannel() : exist.getChannel());
         return ReqResult.success(null);
     }
 
@@ -201,7 +208,22 @@ public class ImChannelController {
         if (!success) {
             return ReqResult.error("删除失败");
         }
+        reloadQqChannelIfNeeded(exist.getChannel());
         return ReqResult.success(null);
+    }
+
+    /**
+     * QQ 渠道配置发生变化后同步连接状态：仍在运行则重连让新密钥生效，已无可用配置则断开。
+     */
+    private void reloadQqChannelIfNeeded(String channel) {
+        if (!ImChannelEnum.QQ.getCode().equals(channel)) {
+            return;
+        }
+        try {
+            qqChannelService.onConfigChanged();
+        } catch (Exception e) {
+            log.warn("QQ channel reload failed after config changed: {}", e.getMessage(), e);
+        }
     }
 
     @PostMapping("/testConnection")

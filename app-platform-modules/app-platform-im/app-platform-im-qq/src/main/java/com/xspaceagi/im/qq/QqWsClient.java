@@ -66,6 +66,19 @@ public class QqWsClient {
     private String activeBotToken;
     private final Map<String, Long> handledGroupAtMsgIds = new ConcurrentHashMap<>();
 
+    /** WebSocket 是否已打开（onOpen 置 true，onClose/异常置 false） */
+    private volatile boolean connected = false;
+    /** 是否已鉴权成功（收到 READY 置 true） */
+    private volatile boolean authenticated = false;
+    /** 最近一次收到网关消息的时间戳 */
+    private volatile long lastEventAt = 0;
+    /** 最近一次 WebSocket 打开的时间戳 */
+    private volatile long lastConnectedAt = 0;
+    /** 自启动以来的重连次数 */
+    private volatile int reconnectCount = 0;
+    /** 最近一次错误信息 */
+    private volatile String lastError;
+
     private CompletableFuture<Void> closeFuture;
 
     public QqWsClient(QqConfig config, QqAgentApplicationService qqAgentApplicationService,
@@ -82,6 +95,8 @@ public class QqWsClient {
             return;
         }
         running = true;
+        lastError = null;
+        reconnectCount = 0;
         connectScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "qq-ws-connect");
             t.setDaemon(true);
@@ -93,6 +108,8 @@ public class QqWsClient {
 
     public void stop() {
         running = false;
+        connected = false;
+        authenticated = false;
         if (webSocket != null) {
             try {
                 webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "shutdown");
@@ -106,6 +123,31 @@ public class QqWsClient {
         log.info("[QQ] QQ 渠道已停止");
     }
 
+    /**
+     * 客户端是否处于运行态（已启动且未停止）。
+     */
+    public boolean isRunning() {
+        return running;
+    }
+
+    /**
+     * 采集当前连接状态快照，供前端展示。
+     */
+    public QqChannelStatus getStatus() {
+        return QqChannelStatus.builder()
+                .running(running)
+                .connected(connected)
+                .authenticated(authenticated)
+                .botAppId(activeBotAppId)
+                .sessionId(sessionId)
+                .lastEventAt(lastEventAt == 0 ? null : lastEventAt)
+                .lastConnectedAt(lastConnectedAt == 0 ? null : lastConnectedAt)
+                .reconnectCount(reconnectCount)
+                .lastError(lastError)
+                .intents(config.getIntents())
+                .build();
+    }
+
     private void connectLoop() {
         int attempt = 0;
         while (running) {
@@ -115,6 +157,9 @@ public class QqWsClient {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
+                lastError = e.getMessage();
+                connected = false;
+                authenticated = false;
                 log.warn("[QQ] WebSocket 连接异常：{}", e.getMessage());
             }
             if (!running) {
@@ -122,6 +167,7 @@ public class QqWsClient {
             }
             long delayMs = Math.min(30_000L, 1_000L * (1L << Math.min(attempt, 5)));
             attempt++;
+            reconnectCount = attempt;
             log.info("[QQ] {}ms 后尝试重连（第 {} 次）", delayMs, attempt);
             try {
                 Thread.sleep(delayMs);
@@ -229,8 +275,10 @@ public class QqWsClient {
         if (data == null) {
             return;
         }
+        lastEventAt = System.currentTimeMillis();
         if ("READY".equals(type)) {
             sessionId = data.getString("session_id");
+            authenticated = true;
             log.info("[QQ] 鉴权成功，session_id={}", sessionId);
             return;
         }
@@ -440,6 +488,8 @@ public class QqWsClient {
         @Override
         public void onOpen(WebSocket webSocket) {
             QqWsClient.this.webSocket = webSocket;
+            connected = true;
+            lastConnectedAt = System.currentTimeMillis();
             log.info("[QQ] WebSocket 已打开，等待 Hello");
             webSocket.request(1);
         }
@@ -487,11 +537,16 @@ public class QqWsClient {
 
         @Override
         public void onError(WebSocket webSocket, Throwable error) {
+            lastError = error.getMessage();
+            connected = false;
+            authenticated = false;
             log.warn("[QQ] WebSocket 错误：{}", error.getMessage());
         }
 
         @Override
         public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+            connected = false;
+            authenticated = false;
             log.info("[QQ] WebSocket 已关闭 status={}, reason={}", statusCode, reason);
             if (closeFuture != null && !closeFuture.isDone()) {
                 closeFuture.complete(null);
