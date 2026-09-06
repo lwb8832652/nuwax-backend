@@ -1,0 +1,26 @@
+CREATE TABLE IF NOT EXISTS `im_qq_message`
+(
+    `id`                bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    `_tenant_id`        bigint(20) DEFAULT NULL COMMENT '租户ID',
+    `space_id`          bigint(20) DEFAULT NULL COMMENT '空间ID',
+    `user_id`           bigint(20) DEFAULT NULL COMMENT '系统用户ID',
+    `agent_id`          bigint(20) DEFAULT NULL COMMENT '关联智能体ID',
+    `bot_app_id`        varchar(128) DEFAULT NULL COMMENT 'QQ机器人AppID',
+    `group_openid`      varchar(255) NOT NULL COMMENT 'QQ群OpenID',
+    `user_openid`       varchar(255) DEFAULT NULL COMMENT 'QQ用户OpenID',
+    `member_openid`     varchar(255) DEFAULT NULL COMMENT 'QQ群成员OpenID',
+    `qq_msg_id`         varchar(255) NOT NULL COMMENT 'QQ消息ID',
+    `event_type`        varchar(64)  NOT NULL COMMENT '事件类型',
+    `content`           mediumtext COMMENT '消息文本内容',
+    `message_type`      int(11) DEFAULT NULL COMMENT '消息内容类型',
+    `attachments_json`  mediumtext COMMENT '附件JSON',
+    `msg_elements_json` mediumtext COMMENT '消息元素JSON',
+    `raw_payload`       mediumtext COMMENT '原始事件JSON',
+    `message_time`      datetime DEFAULT NULL COMMENT 'QQ消息发送时间',
+    `created`           datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `modified`          datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_qq_msg_id` (`qq_msg_id`),
+    KEY `idx_tenant_group_time` (`_tenant_id`, `group_openid`, `message_time`),
+    KEY `idx_tenant_agent_time` (`_tenant_id`, `agent_id`, `message_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='QQ 群消息归档表';

@@ -90,6 +90,9 @@ public class ImSessionApplicationServiceImpl implements ImSessionApplicationServ
             case WECHAT_ILINK:
                 topic = isCN ? WECHAT_ILINK.getName() : WECHAT_ILINK.getCode();
                 break;
+            case QQ:
+                topic = isCN ? QQ.getName() : QQ.getCode();
+                break;
             default:
                 break;
         }

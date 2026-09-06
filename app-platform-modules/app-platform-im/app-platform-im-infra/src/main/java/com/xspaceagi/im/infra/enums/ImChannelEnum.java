@@ -14,7 +14,9 @@ public enum ImChannelEnum {
     DINGTALK("dingtalk", "钉钉"),
     WEWORK("wework", "企业微信"),
     /** 个人微信 iLink 机器人（非公众号/非企微回调） */
-    WECHAT_ILINK("wechat_ilink", "微信");
+    WECHAT_ILINK("wechat_ilink", "微信"),
+    /** 腾讯官方 QQ 群机器人 */
+    QQ("qq", "QQ");
 
     private final String code;
     private final String name;

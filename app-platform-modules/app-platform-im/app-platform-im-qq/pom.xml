@@ -9,7 +9,9 @@
         <version>0.0.1-SNAPSHOT</version>
     </parent>
 
-    <artifactId>app-platform-im-web</artifactId>
+    <artifactId>app-platform-im-qq</artifactId>
+    <name>app-platform-im-qq</name>
+    <description>腾讯官方 QQ 机器人渠道（WebSocket 接入，对齐 QQ 开放平台 v2 协议）</description>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -21,41 +23,23 @@
         <dependency>
             <groupId>com.xspaceagi</groupId>
             <artifactId>app-platform-im-application</artifactId>
-        </dependency>
-
-        <!-- 腾讯官方 QQ 机器人渠道（WebSocket 接入） -->
-        <dependency>
-            <groupId>com.xspaceagi</groupId>
-            <artifactId>app-platform-im-qq</artifactId>
             <version>${project.version}</version>
         </dependency>
-
         <dependency>
-            <groupId>com.xspaceagi</groupId>
-            <artifactId>system-spec</artifactId>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.xspaceagi</groupId>
-            <artifactId>system-application</artifactId>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
         </dependency>
-
         <dependency>
-            <groupId>com.xspaceagi</groupId>
-            <artifactId>app-platform-file-application</artifactId>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
         </dependency>
-
-        <!-- 飞书 -->
         <dependency>
-            <groupId>com.larksuite.oapi</groupId>
-            <artifactId>oapi-sdk</artifactId>
-            <version>2.5.3</version>
-        </dependency>
-
-        <!-- 企业微信 -->
-        <dependency>
-            <groupId>com.github.binarywang</groupId>
-            <artifactId>weixin-java-cp</artifactId>
-            <version>4.8.0</version>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
         </dependency>
     </dependencies>
 </project>

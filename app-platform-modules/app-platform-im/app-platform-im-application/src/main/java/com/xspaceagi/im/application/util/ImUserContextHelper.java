@@ -39,6 +39,7 @@ public final class ImUserContextHelper {
             case DINGTALK -> "2".equals(chatType);
             case WEWORK -> ImChatTypeEnum.GROUP == ImChatTypeEnum.fromCode(chatType);
             case WECHAT_ILINK -> false;
+            case QQ -> ImChatTypeEnum.GROUP == ImChatTypeEnum.fromCode(chatType);
         };
     }
 

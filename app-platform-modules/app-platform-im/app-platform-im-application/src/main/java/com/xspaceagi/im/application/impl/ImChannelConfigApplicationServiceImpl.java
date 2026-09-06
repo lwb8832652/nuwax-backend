@@ -99,6 +99,24 @@ public class ImChannelConfigApplicationServiceImpl implements ImChannelConfigApp
     }
 
     @Override
+    public List<ImChannelConfigDto> listQqEnabledByPage(int offset, int limit) {
+        List<ImChannelConfig> configs = TenantFunctions.callWithIgnoreCheck(() -> {
+            ImChannelConfig query = new ImChannelConfig();
+            query.setChannel(ImChannelEnum.QQ.getCode());
+            query.setTargetType(ImTargetTypeEnum.BOT.getCode());
+            query.setEnabled(true);
+            return imChannelConfigDomainService.listByPage(query, offset, limit);
+        });
+        if (configs == null || configs.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return configs.stream()
+                .map(this::toDto)
+                .filter(cfg -> cfg != null && ImChannelEnum.QQ.getCode().equals(cfg.getChannel()))
+                .collect(Collectors.toList());
+    }
+
+    @Override
     public ImChannelConfigDto getWechatIlinkConfigByIlinkAccountId(String ilinkAccountId) {
         return getConfig(ImChannelEnum.WECHAT_ILINK.getCode(), ImTargetTypeEnum.BOT, ilinkAccountId);
     }
@@ -290,6 +308,12 @@ public class ImChannelConfigApplicationServiceImpl implements ImChannelConfigApp
                 app.setEncodingAesKey(json.getString("encodingAesKey"));
                 dto.setWeworkApp(app);
             }
+        } else if (ImChannelEnum.QQ.getCode().equals(channel) && targetType == ImTargetTypeEnum.BOT) {
+            ImChannelConfigDto.QqConfig qq = new ImChannelConfigDto.QqConfig();
+            qq.setBotAppId(firstNonBlank(json.getString("botAppId"), json.getString("appId")));
+            qq.setBotToken(firstNonBlank(json.getString("botToken"), json.getString("appSecret"), json.getString("botSecret")));
+            qq.setBotId(json.getString("botId"));
+            dto.setQq(qq);
         } else if (ImChannelEnum.WECHAT_ILINK.getCode().equals(channel) && targetType == ImTargetTypeEnum.BOT) {
             ImChannelConfigDto.WechatIlinkConfig w = new ImChannelConfigDto.WechatIlinkConfig();
             w.setBaseUrl(json.getString("baseUrl"));
@@ -637,9 +661,29 @@ public class ImChannelConfigApplicationServiceImpl implements ImChannelConfigApp
             targetId = json.getString("token");
         } else if (channel == ImChannelEnum.WECHAT_ILINK) {
             targetId = json.getString("ilinkAccountId");
+        } else if (channel == ImChannelEnum.QQ) {
+            targetId = json.getString("botId");
+            if (StringUtils.isBlank(targetId)) {
+                targetId = firstNonBlank(json.getString("botAppId"), json.getString("appId"));
+            }
+            if (StringUtils.isBlank(targetId)) {
+                targetId = "default";
+            }
         }
 
         return targetId;
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            if (StringUtils.isNotBlank(value)) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private ImOutputModeEnum getDefaultOutputMode(ImChannelConfig config) {
@@ -657,6 +701,8 @@ public class ImChannelConfigApplicationServiceImpl implements ImChannelConfigApp
                     return ImOutputModeEnum.ONCE;
                 }
             case WECHAT_ILINK:
+                return ImOutputModeEnum.ONCE;
+            case QQ:
                 return ImOutputModeEnum.ONCE;
             default:
                 return ImOutputModeEnum.ONCE;

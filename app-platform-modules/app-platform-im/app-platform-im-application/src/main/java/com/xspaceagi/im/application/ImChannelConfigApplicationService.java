@@ -32,6 +32,11 @@ public interface ImChannelConfigApplicationService {
     List<ImChannelConfigDto> listWechatIlinkEnabledByPage(int offset, int limit);
 
     /**
+     * 分页查询已启用的 QQ 官方机器人配置（跨租户，供 QQ WS 收消息时选择 Agent 使用）
+     */
+    List<ImChannelConfigDto> listQqEnabledByPage(int offset, int limit);
+
+    /**
      * 按 ilinkAccountId 查询微信 iLink 配置
      */
     ImChannelConfigDto getWechatIlinkConfigByIlinkAccountId(String ilinkAccountId);

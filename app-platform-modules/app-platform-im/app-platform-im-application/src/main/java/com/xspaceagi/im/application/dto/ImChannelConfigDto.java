@@ -31,6 +31,7 @@ public class ImChannelConfigDto {
     private WeworkBotConfig weworkBot;
     private WeworkAppConfig weworkApp;
     private WechatIlinkConfig wechatIlink;
+    private QqConfig qq;
 
     @Data
     public static class FeishuConfig {
@@ -63,6 +64,16 @@ public class ImChannelConfigDto {
         private String corpSecret;
         private String token;
         private String encodingAesKey;
+    }
+
+    @Data
+    public static class QqConfig {
+        /** 官方 QQ 机器人 AppID */
+        private String botAppId;
+        /** 官方 QQ 机器人 AppSecret */
+        private String botToken;
+        /** 配置唯一标识；为空时默认使用 botAppId */
+        private String botId;
     }
 
     @Data
