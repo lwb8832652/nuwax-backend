@@ -19,11 +19,14 @@ import com.xspaceagi.system.spec.tenant.thread.TenantFunctions;
 import com.xspaceagi.system.spec.utils.I18nUtil;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoSink;
 
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -42,6 +45,12 @@ public class ConversationTaskExecuteServiceImpl implements TaskExecuteService {
 
     @Resource
     private TenantConfigApplicationService tenantConfigApplicationService;
+
+    /**
+     * 单次会话任务的最长执行时间（分钟），超时强制终止，避免任务永远停留在 EXECUTING，0 表示不限制
+     */
+    @Value("${conversation.task.max-duration-minutes:360}")
+    private int conversationTaskMaxDurationMinutes;
 
     @Override
     public Mono<Boolean> asyncExecute(ScheduleTaskDto scheduleTask) {
@@ -83,7 +92,12 @@ public class ConversationTaskExecuteServiceImpl implements TaskExecuteService {
             requestContext.setUser(userDto);
             RequestContext.get().setUserId(userDto.getId());
             AtomicBoolean retry = new AtomicBoolean(false);
-            conversationApplicationService.chat(tryReqDto, new HashMap<>(), false).doOnComplete(() -> {
+            Flux<AgentOutputDto> chatFlux = conversationApplicationService.chat(tryReqDto, new HashMap<>(), false);
+            if (conversationTaskMaxDurationMinutes > 0) {
+                // 兜底：会话流异常挂起时强制超时，避免调度任务永远停留在 EXECUTING
+                chatFlux = chatFlux.timeout(Duration.ofMinutes(conversationTaskMaxDurationMinutes));
+            }
+            chatFlux.doOnComplete(() -> {
                 log.debug("ConversationTaskExecuteServiceImpl.execute() - doOnComplete {}=>{}", conversation.getId(), conversation.getTopic());
                 if (!retry.get()) {
                     sink.success(false);
@@ -97,6 +111,8 @@ public class ConversationTaskExecuteServiceImpl implements TaskExecuteService {
                             //最多执行三次
                             if (times == 2) {
                                 log.error("ConversationTaskExecuteServiceImpl.execute() - execute0 times: {}", times);
+                                // 重试次数用尽：必须终止 Mono，否则任务会永远停留在 EXECUTING（僵尸任务）
+                                retry.set(true);
                                 try {
                                     TenantFunctions.callWithIgnoreCheck(() -> notifyMessageApplicationService.sendNotifyMessage(SendNotifyMessageDto.builder()
                                             .tenantId(requestContext.getTenantId())
@@ -106,8 +122,9 @@ public class ConversationTaskExecuteServiceImpl implements TaskExecuteService {
                                             .userIds(Collections.singletonList(conversation.getUserId()))
                                             .build()));
                                 } catch (Exception e) {
-                                    sink.error(e);
+                                    log.error("ConversationTaskExecuteServiceImpl.execute() - send notify message failed", e);
                                 }
+                                sink.success(false);
                                 return;
                             }
                             retry.set(true);
@@ -118,6 +135,7 @@ public class ConversationTaskExecuteServiceImpl implements TaskExecuteService {
                     }
                 }
             }, error -> {
+                log.warn("ConversationTaskExecuteServiceImpl.execute() - error, cid {}, error {}", conversation.getId(), error.toString());
                 sink.success(false);//任务返回false表示下次继续执行
             });
         } finally {

@@ -27,6 +27,11 @@ import java.util.stream.Collectors;
 @Service
 public class AuthServiceImpl implements AuthService {
 
+    /**
+     * 过期 token 检查时，单次 MGET / HDEL 携带的最大 key 数
+     */
+    private static final int TOKEN_CHECK_BATCH_SIZE = 200;
+
     @Resource
     private UserApplicationService userApplicationService;
 
@@ -107,14 +112,8 @@ public class AuthServiceImpl implements AuthService {
     }
 
     public String createToken(UserDto userDto, String clientId) {
-        //过期token检查
-        Map<String, Object> map = redisUtil.hashGetAll("user-token:" + userDto.getId());
-        for (Map.Entry<String, Object> entry : map.entrySet()) {
-            String key = entry.getKey();
-            if (redisUtil.get("token:" + key) == null) {
-                redisUtil.hashDelete("user-token:" + userDto.getId(), key);
-            }
-        }
+        //过期token检查（批量清理，避免逐条 get 造成 N+1 导致登录极慢）
+        cleanExpiredTokens(userDto.getId());
         TenantConfigDto tenantConfigDto = (TenantConfigDto) RequestContext.get().getTenantConfig();
         int expire = (int) (tenantConfigDto.getAuthExpire() == null ? 86400 : tenantConfigDto.getAuthExpire() * 60);
         String token = JwtUtils.createJwt(String.valueOf(userDto.getId()), userDto.getPhone(), jwtSecretKey, expire, new HashMap<>());
@@ -122,6 +121,48 @@ public class AuthServiceImpl implements AuthService {
         redisUtil.hashPut("user-token:" + userDto.getId(), token, clientId);
         redisUtil.expire("user-token:" + userDto.getId(), expire);
         return token;
+    }
+
+    /**
+     * 清理该用户下已失效的历史 token。
+     * <p>
+     * 原实现为「每条 token 一次 GET」的 N+1 调用，历史 token 积累到上千条时，
+     * 在应用与 Redis 跨网/高 RTT 的部署下会把登录拖到分钟级甚至超时；
+     * 且登录越慢越不容易完成清理，形成自我恶化。
+     * <p>
+     * 改为：HKEYS 一次 + MGET 分批 + HDEL 分批，网络往返从 O(n) 降到 O(n/batch)。
+     */
+    private void cleanExpiredTokens(Long userId) {
+        String userTokenKey = "user-token:" + userId;
+        Set<Object> historyTokens = redisUtil.hashKeys(userTokenKey);
+        if (historyTokens == null || historyTokens.isEmpty()) {
+            return;
+        }
+        List<String> tokens = historyTokens.stream().map(String::valueOf).collect(Collectors.toList());
+        List<String> expired = new ArrayList<>();
+        for (int i = 0; i < tokens.size(); i += TOKEN_CHECK_BATCH_SIZE) {
+            List<String> batch = tokens.subList(i, Math.min(i + TOKEN_CHECK_BATCH_SIZE, tokens.size()));
+            List<String> keys = batch.stream().map(t -> "token:" + t).collect(Collectors.toList());
+            List<Object> values = redisUtil.multiGet(keys);
+            if (values.size() != batch.size()) {
+                // 结果数量对不上时跳过该批次，避免误删有效 token
+                log.warn("cleanExpiredTokens skip batch: userId={}, batch={}, values={}", userId, batch.size(), values.size());
+                continue;
+            }
+            for (int j = 0; j < values.size(); j++) {
+                if (values.get(j) == null) {
+                    expired.add(batch.get(j));
+                }
+            }
+        }
+        if (expired.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < expired.size(); i += TOKEN_CHECK_BATCH_SIZE) {
+            List<String> batch = expired.subList(i, Math.min(i + TOKEN_CHECK_BATCH_SIZE, expired.size()));
+            redisUtil.delete(userTokenKey, batch.toArray(new String[0]));
+        }
+        log.info("cleanExpiredTokens: userId={}, history={}, removed={}", userId, tokens.size(), expired.size());
     }
 
     @Override

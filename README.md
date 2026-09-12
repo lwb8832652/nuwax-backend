@@ -244,6 +244,52 @@ The Nuwax AI Agent Platform consists of multiple interconnected repositories:
 | Memory | 4GB | 8GB+ |
 | CPU | 2 cores | 4 cores+ |
 
+### System Dependencies (Document Parsing, Optional)
+
+The backend uses **Apache Tika** to parse knowledge-base documents. Common formats (PDF, Word, Excel, PPT, Markdown, plain text) are handled by Tika's built-in parsers and require **no extra software**.
+The following external programs are **optional enhancements**, needed only for the corresponding capability:
+
+| Tool | Purpose | Impact if missing |
+|------|---------|-------------------|
+| `ffmpeg` | Audio/video parsing (frame extraction, transcoding, metadata) | Audio/video parsing unavailable |
+| `exiftool` | Image EXIF / GPS metadata extraction | Image metadata not extracted |
+| `sox` | Audio file parsing | Audio parsing unavailable |
+| `tesseract` | OCR text recognition from images | Cannot extract text from images/scans |
+
+> When a tool is missing, the startup log shows `Cannot run program "xxx": error=2, No such file or directory`. This is Tika's **DEBUG-level detection log, not an error**, and does not affect startup or regular document parsing.
+
+**Ubuntu / Debian**
+
+```bash
+apt-get update
+apt-get install -y ffmpeg libimage-exiftool-perl sox tesseract-ocr
+# Chinese OCR additionally needs the language pack
+apt-get install -y tesseract-ocr-chi-sim
+```
+
+> If you get `404 Not Found`, the local package index is stale (the mirror has newer versions). Run `apt-get update` first.
+
+**CentOS / RHEL / Rocky**
+
+```bash
+yum install -y epel-release
+yum install -y ffmpeg ffmpeg-devel perl-Image-ExifTool sox tesseract tesseract-langpack-chi_sim
+```
+
+**macOS (local development)**
+
+```bash
+brew install ffmpeg exiftool sox tesseract tesseract-lang
+```
+
+**Verify**
+
+```bash
+which ffmpeg exiftool sox tesseract
+```
+
+> ⚠️ **Restart the application after installing**: Tika probes these programs once during the static initialization of `com.xspaceagi.agent.core.spec.utils.UrlFile`.
+
 ### 1. Clone the Repository
 
 ```bash

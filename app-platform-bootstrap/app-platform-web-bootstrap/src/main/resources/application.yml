@@ -30,6 +30,13 @@ server:
     max-http-form-post-size: 0
     # 设置URI编码为UTF-8，支持中文等非ASCII字符
     uri-encoding: UTF-8
+    threads:
+      # 工作线程数：默认 200 在多数部署规格下偏大，按机器规格调整；4C8G 取 150
+      max: ${TOMCAT_MAX_THREADS:150}
+      min-spare: ${TOMCAT_MIN_SPARE_THREADS:20}
+    # 连接与排队上限：需大于 threads.max，否则线程未打满就先拒绝连接
+    max-connections: ${TOMCAT_MAX_CONNECTIONS:300}
+    accept-count: ${TOMCAT_ACCEPT_COUNT:100}
 
 logging:
   config: classpath:logback-custom.xml
@@ -159,3 +166,28 @@ sandbox:
         - "pay/general/**"
         - "agent/conversation/**"
         - "agent/*"
+
+# 网页开发(custom-page)线程池容量：按部署机器规格调整，默认值面向 2C4G 小规格部署
+custom-page:
+  thread-pool:
+    # 短 IO：Flux 推送、/chat HTTP 调用；一次 AI 对话独占一个线程直到本轮结束
+    chat:
+      core-size: ${CUSTOM_PAGE_CHAT_CORE_SIZE:8}
+      max-size: ${CUSTOM_PAGE_CHAT_MAX_SIZE:30}
+      queue-capacity: ${CUSTOM_PAGE_CHAT_QUEUE:30}
+      keep-alive-seconds: 60
+    # 长 IO：Agent 进度 SSE 订阅；一个订阅独占一个线程直到沙箱事件流结束
+    progress:
+      core-size: ${CUSTOM_PAGE_PROGRESS_CORE_SIZE:8}
+      max-size: ${CUSTOM_PAGE_PROGRESS_MAX_SIZE:30}
+      queue-capacity: ${CUSTOM_PAGE_PROGRESS_QUEUE:10}
+      keep-alive-seconds: 60
+    # progress 池饱和时，排队等待入队的最长时间(秒)，超时才拒绝（避免调用方线程被无限阻塞）
+    progress-enqueue-wait-seconds: ${CUSTOM_PAGE_PROGRESS_ENQUEUE_WAIT:5}
+    # DB 轮询回放的调度线程数
+    scheduler-size: ${CUSTOM_PAGE_SCHEDULER_SIZE:2}
+    # 沙箱 SSE 订阅超时与回收：防止对端僵死或前端关闭后订阅长期占用线程
+    sse:
+      read-timeout-seconds: ${CUSTOM_PAGE_SSE_READ_TIMEOUT:600}
+      max-duration-seconds: ${CUSTOM_PAGE_SSE_MAX_DURATION:3600}
+      detach-grace-period-seconds: ${CUSTOM_PAGE_SSE_DETACH_GRACE:60}

@@ -19,6 +19,7 @@ import org.quartz.TriggerBuilder;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -33,6 +34,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class ScheduleTaskDomainServiceImpl implements ScheduleTaskDomainService {
 
     private static final int MAX_EXEC_CT = 1000;
+
+    /**
+     * 无 cron 的任务在返回 false（继续执行）时的最小重排间隔（毫秒），
+     * 避免 lockTime 不推进导致任务被立即再次捞取形成忙循环
+     */
+    @Value("${schedule-task.min-reschedule-interval-millis:5000}")
+    private long minRescheduleIntervalMillis;
 
     @Resource
     private ScheduleTaskService scheduleTaskService;
@@ -80,6 +88,10 @@ public class ScheduleTaskDomainServiceImpl implements ScheduleTaskDomainService 
                 scheduleTask.setStatus(res ? ScheduleTaskDto.Status.COMPLETE : ScheduleTaskDto.Status.CONTINUE);
                 if (!res && scheduleTask.getExecTimes() >= scheduleTask.getMaxExecTimes()) {
                     scheduleTask.setStatus(ScheduleTaskDto.Status.COMPLETE);
+                }
+                // 无 cron 的任务 lockTime 不会自动推进，返回 false 时会被立即再次捞取，这里给最小重排间隔兜底
+                if (!res && StringUtils.isBlank(scheduleTask.getCron())) {
+                    scheduleTask.setLockTime(new Date(System.currentTimeMillis() + minRescheduleIntervalMillis));
                 }
                 scheduleTask.setError("");
                 scheduleTaskService.updateById(scheduleTask);

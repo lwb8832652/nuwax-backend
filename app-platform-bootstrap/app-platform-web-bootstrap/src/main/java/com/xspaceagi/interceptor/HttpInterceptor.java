@@ -49,6 +49,11 @@ import java.util.UUID;
 @ControllerAdvice
 public class HttpInterceptor implements HandlerInterceptor, ResponseBodyAdvice, RequestBodyAdvice {
 
+    /**
+     * 写入 ES 的请求/响应正文最大长度，防止大报文撑爆 ES bulk 与日志链路
+     */
+    private static final int MAX_ES_TEXT_LENGTH = 64 * 1024;
+
     @Value("${access.control.allow-origin}")
     private String accessControlAllowOrigin;
 
@@ -161,8 +166,8 @@ public class HttpInterceptor implements HandlerInterceptor, ResponseBodyAdvice, 
                 .targetType("ApiKey")
                 .targetName(userAccessKey.getName())
                 .targetId(userAccessKey.getId().toString())
-                .input(requestBodyStr)
-                .output(responseBody)
+                .input(truncateForEs(requestBodyStr))
+                .output(truncateForEs(responseBody))
                 .requestStartTime(reqBeginTime)
                 .requestEndTime(System.currentTimeMillis())
                 .resultCode(httpResult.getCode())
@@ -173,6 +178,13 @@ public class HttpInterceptor implements HandlerInterceptor, ResponseBodyAdvice, 
                 .from("ApiKey")
                 .build();
         iLogRpcService.bulkIndex(List.of(logDocument));
+    }
+
+    private static String truncateForEs(String text) {
+        if (text == null || text.length() <= MAX_ES_TEXT_LENGTH) {
+            return text;
+        }
+        return text.substring(0, MAX_ES_TEXT_LENGTH) + "...[truncated, total " + text.length() + " chars]";
     }
 
     @Override

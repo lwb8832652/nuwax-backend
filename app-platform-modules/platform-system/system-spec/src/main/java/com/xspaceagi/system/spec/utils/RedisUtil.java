@@ -4,6 +4,8 @@ import jakarta.annotation.Resource;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -66,6 +68,21 @@ public class RedisUtil {
      */
     public Object get(String key) {
         return key == null ? null : redisTemplate.opsForValue().get(key);
+    }
+
+    /**
+     * 批量获取值（MGET，一次网络往返），用于替代逐条 get 的 N+1 调用。
+     * 注意：返回值与入参顺序一致，不存在的 key 对应位置为 null。
+     *
+     * @param keys 键列表
+     * @return 与入参顺序一致的结果列表；入参为空时返回空列表
+     */
+    public List<Object> multiGet(Collection<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Object> values = redisTemplate.opsForValue().multiGet(keys);
+        return values == null ? Collections.emptyList() : values;
     }
 
     /**

@@ -9,11 +9,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 import com.xspaceagi.custompage.domain.model.CustomPageConfigModel;
+import com.xspaceagi.custompage.domain.threadpool.CustomPageSseProperties;
 import com.xspaceagi.custompage.domain.repository.ICustomPageConfigRepository;
 import com.xspaceagi.sandbox.sdk.server.ISandboxConfigRpcService;
 import com.xspaceagi.sandbox.sdk.service.dto.SandboxConfigRpcDto;
@@ -50,6 +53,8 @@ public class PageAppAIClient {
     @Resource
     @Qualifier("aiAgentProgressExecutor")
     private Executor aiAgentProgressExecutor;
+    @Resource
+    private CustomPageSseProperties sseProperties;
 
     @Data
     @AllArgsConstructor
@@ -90,21 +95,24 @@ public class PageAppAIClient {
         return body;
     }
 
-    public void subscribeSessionSse(String sessionId, SseEmitter emitter, Long projectId, UserContext userContext,
-            BiConsumer<String, String> eventConsumer) {
-        subscribeSessionSse(sessionId, emitter, projectId, userContext, eventConsumer, null, null);
+    public SseSubscription subscribeSessionSse(String sessionId, SseEmitter emitter, Long projectId,
+            UserContext userContext, BiConsumer<String, String> eventConsumer) {
+        return subscribeSessionSse(sessionId, emitter, projectId, userContext, eventConsumer, null, null);
     }
 
-    public void subscribeSessionSse(String sessionId, SseEmitter emitter, Long projectId, UserContext userContext,
-            BiConsumer<String, String> eventConsumer, Runnable onStreamFinished) {
-        subscribeSessionSse(sessionId, emitter, projectId, userContext, eventConsumer, onStreamFinished, null);
+    public SseSubscription subscribeSessionSse(String sessionId, SseEmitter emitter, Long projectId,
+            UserContext userContext, BiConsumer<String, String> eventConsumer, Runnable onStreamFinished) {
+        return subscribeSessionSse(sessionId, emitter, projectId, userContext, eventConsumer, onStreamFinished, null);
     }
 
-    public void subscribeSessionSse(String sessionId, SseEmitter emitter, Long projectId, UserContext userContext,
-            BiConsumer<String, String> eventConsumer, Runnable onStreamFinished, Consumer<String> onSubscribeError) {
+    public SseSubscription subscribeSessionSse(String sessionId, SseEmitter emitter, Long projectId,
+            UserContext userContext, BiConsumer<String, String> eventConsumer, Runnable onStreamFinished,
+            Consumer<String> onSubscribeError) {
         AgentRuntimeContext runtimeContext = buildAgentRuntimeContext(projectId, userContext);
         AtomicBoolean clientDisconnected = new AtomicBoolean(false);
-        aiAgentProgressExecutor.execute(() -> {
+        SseSubscription subscription = new SseSubscription();
+        long deadlineMs = System.currentTimeMillis() + sseProperties.getMaxDurationSeconds() * 1000L;
+        Runnable subscribeTask = () -> {
             HttpURLConnection connection = null;
             try {
                 String urlStr = appendRuntimeParams(UriComponentsBuilder.fromHttpUrl(buildBaseUrl(runtimeContext) + "/agent/progress/" + sessionId), runtimeContext).toUriString();
@@ -117,7 +125,10 @@ public class PageAppAIClient {
                 connection.setRequestProperty("Connection", "keep-alive");
                 connection.setDoInput(true);
                 connection.setConnectTimeout(30000); // 连接超时时间30秒
-                connection.setReadTimeout(0); // SSE 长连接
+                // 读取超时：0 表示无限等待，对端僵死时线程永不释放；改为可配置的有限值防止线程被永久占用
+                connection.setReadTimeout((int) Math.min(sseProperties.getReadTimeoutSeconds() * 1000L,
+                        Integer.MAX_VALUE));
+                subscription.attach(connection);
 
                 int status = connection.getResponseCode();
                 if (status != 200) {
@@ -138,6 +149,11 @@ public class PageAppAIClient {
                     String currentEvent = null;
                     StringBuilder dataBuilder = new StringBuilder();
                     while ((line = reader.readLine()) != null) {
+                        // 总时长兜底：超过 maxDurationSeconds 仍无结束则强制停止，防止线程被长期占用
+                        if (System.currentTimeMillis() > deadlineMs) {
+                            log.warn("[Infra] Agent SSE reached max duration, stop subscribing, session Id={}", sessionId);
+                            break;
+                        }
                         if (line.startsWith("event:")) {
                             currentEvent = line.substring(6).trim();
                         } else if (line.startsWith("data:")) {
@@ -200,6 +216,7 @@ public class PageAppAIClient {
                     }
                 }
             } finally {
+                subscription.detach();
                 if (connection != null) {
                     connection.disconnect();
                 }
@@ -212,7 +229,24 @@ public class PageAppAIClient {
                     }
                 }
             }
-        });
+        };
+
+        try {
+            aiAgentProgressExecutor.execute(subscribeTask);
+        } catch (RejectedExecutionException e) {
+            // 线程池饱和（含排队等待超时）：反馈前端并触发 onSubscribeFailed 清理会话状态，
+            // 避免异常上抛造成 500，同时避免 activeCaptures / 捕获锁残留
+            String errorMessage = "The service is busy, please try again later";
+            log.warn("[Infra] Agent SSE subscribe rejected, session Id={}, project Id={}", sessionId, projectId, e);
+            notifySubscribeError(onSubscribeError, errorMessage);
+            if (emitter != null) {
+                try {
+                    emitter.completeWithError(new IllegalStateException(errorMessage));
+                } catch (Exception ignore) {
+                }
+            }
+        }
+        return subscription;
     }
 
     private void notifySubscribeError(Consumer<String> onSubscribeError, String message) {
@@ -399,6 +433,44 @@ public class PageAppAIClient {
             url = url.substring(0, url.length() - 1);
         }
         return url;
+    }
+
+    /**
+     * 沙箱 SSE 订阅句柄，持有底层连接引用，支持在外侧（如所有前端断开后）主动取消，
+     * 使阻塞在 readLine() 上的订阅线程及时退出、归还给线程池。
+     */
+    public static class SseSubscription {
+        private final AtomicReference<HttpURLConnection> connectionRef = new AtomicReference<>();
+        private final AtomicBoolean cancelled = new AtomicBoolean(false);
+
+        void attach(HttpURLConnection connection) {
+            connectionRef.set(connection);
+        }
+
+        void detach() {
+            connectionRef.set(null);
+        }
+
+        /**
+         * 主动取消订阅：关闭底层连接，使阻塞读立即抛出 IOException 从而结束订阅线程。幂等。
+         */
+        public void cancel() {
+            if (!cancelled.compareAndSet(false, true)) {
+                return;
+            }
+            HttpURLConnection conn = connectionRef.getAndSet(null);
+            if (conn != null) {
+                try {
+                    conn.disconnect();
+                } catch (Exception ignore) {
+                    // ignore
+                }
+            }
+        }
+
+        public boolean isCancelled() {
+            return cancelled.get();
+        }
     }
 
 }

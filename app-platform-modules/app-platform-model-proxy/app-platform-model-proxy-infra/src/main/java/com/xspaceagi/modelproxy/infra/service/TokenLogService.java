@@ -31,6 +31,11 @@ import java.util.UUID;
 @Service("tokenLogService")
 public class TokenLogService implements TaskExecuteService {
 
+    /**
+     * 写入 ES 的请求/响应正文最大长度，防止大模型流式全文（可达数 MB）撑爆 ES bulk 与日志链路；token 解析仍使用全文，不影响计费
+     */
+    private static final int MAX_ES_TEXT_LENGTH = 64 * 1024;
+
     @Resource
     private RedisUtil redisUtil;
 
@@ -136,9 +141,9 @@ public class TokenLogService implements TaskExecuteService {
                             .requestStartTime(Long.parseLong(requestTime))
                             .requestEndTime(Long.parseLong(responseTime))
                             .requestId(requestId)
-                            .input(requestBody)
+                            .input(truncateForEs(requestBody))
                             .createTime(Long.parseLong(responseTime))
-                            .output(responseBody)
+                            .output(truncateForEs(responseBody))
                             .userId(userId)
                             .userName(userName)
                             .targetType("Model")
@@ -165,5 +170,12 @@ public class TokenLogService implements TaskExecuteService {
             val = redisUtil.rightPop("token_log");
         }
         return Mono.just(false);
+    }
+
+    private static String truncateForEs(String text) {
+        if (text == null || text.length() <= MAX_ES_TEXT_LENGTH) {
+            return text;
+        }
+        return text.substring(0, MAX_ES_TEXT_LENGTH) + "...[truncated, total " + text.length() + " chars]";
     }
 }

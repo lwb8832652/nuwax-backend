@@ -3389,6 +3389,3 @@ CREATE TABLE `knowledge_recall_verification`
     KEY               `idx_id_kb_id_index` (`space_id`, `kb_id`),
     KEY               `idx_kb_id` (`kb_id`)
 );
-
-ALTER TABLE sys_data_permission
-    ADD COLUMN agent_computer_storage_limit_gb DECIMAL(10, 3) NULL DEFAULT NULL COMMENT '智能体电脑存储上限(GB)，-1 表示不限制', ADD COLUMN page_app_storage_limit_gb DECIMAL(10, 3) NULL DEFAULT NULL COMMENT '网页应用存储上限(GB)，-1 表示不限制';

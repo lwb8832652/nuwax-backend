@@ -236,6 +236,52 @@ Nuwax AI 智能体平台由多个相互关联的仓库组成：
 | 内存     | 4GB    | 8GB+       |
 | CPU    | 2 核    | 4 核+       |
 
+### 系统级依赖（文档解析，可选）
+
+后端使用 **Apache Tika** 解析知识库文档。PDF、Word、Excel、PPT、Markdown、文本等常见格式由 Tika 内置解析器处理，**无需安装任何额外软件**；
+下列外部程序为**可选增强**，仅在需要对应能力时才用到：
+
+| 工具 | 用途 | 缺失时的影响 |
+|------|------|------------|
+| `ffmpeg` | 音视频文件解析（抽帧、转码、元数据） | 音视频相关解析不可用 |
+| `exiftool` | 图片 EXIF / GPS 元数据提取 | 图片元数据读不到 |
+| `sox` | 音频文件解析 | 音频解析不可用 |
+| `tesseract` | 图片 OCR 文字识别 | 扫描件/图片无法提取文字 |
+
+> 未安装时启动日志会出现 `Cannot run program "xxx": error=2, No such file or directory`，这是 Tika 的 **DEBUG 级探测日志，不是错误**，不影响服务启动与常规文档解析。
+
+**Ubuntu / Debian**
+
+```bash
+apt-get update
+apt-get install -y ffmpeg libimage-exiftool-perl sox tesseract-ocr
+# 中文 OCR 还需语言包
+apt-get install -y tesseract-ocr-chi-sim
+```
+
+> 若报 `404 Not Found`，说明本地包索引过期（镜像上包已升版），先执行 `apt-get update` 再安装。
+
+**CentOS / RHEL / Rocky**
+
+```bash
+yum install -y epel-release
+yum install -y ffmpeg ffmpeg-devel perl-Image-ExifTool sox tesseract tesseract-langpack-chi_sim
+```
+
+**macOS（本地开发）**
+
+```bash
+brew install ffmpeg exiftool sox tesseract tesseract-lang
+```
+
+**验证**
+
+```bash
+which ffmpeg exiftool sox tesseract
+```
+
+> ⚠️ **安装后需重启应用才生效**：Tika 在 `com.xspaceagi.agent.core.spec.utils.UrlFile` 类静态初始化时探测这些外部程序，JVM 启动后只探测一次。
+
 ### 1. 克隆项目
 
 ```bash

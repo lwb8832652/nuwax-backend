@@ -153,7 +153,7 @@ public class BackendProxyHandler extends ChannelInboundHandlerAdapter {
             byte[] byteArray = responseBuffer.toByteArray();
             byte[] decompress = DecompressUtils.decompress(byteArray, contentEncoding);
             String resBody = new String(decompress, CharsetUtil.UTF_8);
-            logger.debug("Response Body: {}", resBody);
+            logger.debug("Response Body: {}", truncateForLog(resBody, 2048));
             getResponseContext().put("responseBody", resBody);
 
             // 合并请求与响应
@@ -165,13 +165,23 @@ public class BackendProxyHandler extends ChannelInboundHandlerAdapter {
                 }
             }
             String text = JSON.toJSONString(getResponseContext(), JSONWriter.Feature.LargeObject);
-            logger.debug("responseContext: {}", text);
+            logger.debug("responseContext: {}", truncateForLog(text, 2048));
             tokenLogService.log(text);
             responseContext = null;
         } catch (Exception e) {
             responseContext = null;
             logger.error("Error logging response body", e);
         }
+    }
+
+    /**
+     * 截断超长文本，避免大模型流式响应全文（可达数 MB）被整体打进日志
+     */
+    private static String truncateForLog(String text, int maxLength) {
+        if (text == null || text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength) + "...[truncated, total " + text.length() + " chars]";
     }
 
     public Map<String, Object> getResponseContext() {

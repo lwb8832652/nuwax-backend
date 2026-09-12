@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration debug="true">
-    <springProperty name="LOG_LEVEL" scope="context" source="log.level"/>
+    <springProperty name="LOG_LEVEL" scope="context" source="log.level" defaultValue="DEBUG"/>
     <springProperty name="DEV_MODE" scope="context" source="spring.profiles.active"/>
     <!-- 通过 logging.file.path 配置日志输出路径，默认输出到相对路径 logs/ -->
     <springProperty name="logPath" scope="context" source="logging.file.path" defaultValue="logs"/>
@@ -31,10 +31,9 @@
 
     <!-- 如果是可以容忍重启时丢失的应用日志，可以使用异步日志输出，大幅提升日志性能 -->
     <appender name="ASYNC_APP_LOG_FILE" class="ch.qos.logback.classic.AsyncAppender">
-        <!-- 建议不丢失日志，设置为0 -->
-        <discardingThreshold>0</discardingThreshold>
-        <!-- 更改默认的队列的长度，该值会影响性能，默认值为256 -->
-        <queueSize>512</queueSize>
+        <!-- 日志洪峰时按默认 discardingThreshold 丢弃 TRACE/DEBUG/INFO 级别日志，neverBlock 保证任何情况下不阻塞业务线程 -->
+        <queueSize>2048</queueSize>
+        <neverBlock>true</neverBlock>
         <appender-ref ref="APP_LOG_FILE"/>
     </appender>
 
@@ -48,10 +47,22 @@
     <logger name="org.redisson" level="ERROR"/>
     <logger name="com.alibaba" level="ERROR"/>
     <logger name="com.xspaceagi.system.domain.service.impl.ScheduleTaskDomainServiceImpl" level="ERROR"/>
+    <!-- HTTP wire 级日志会把流式响应逐 16 字节做十六进制展开，大模型流式+ES 写入场景下会形成日志风暴，必须压制 -->
+    <logger name="org.apache.hc.client5.http.wire" level="WARN"/>
+    <logger name="org.apache.hc.core5" level="WARN"/>
+    <logger name="org.apache.http.wire" level="WARN"/>
+    <logger name="org.apache.http.headers" level="WARN"/>
+    <logger name="co.elastic.clients" level="WARN"/>
 
     <!-- 缺省应用日志输出 -->
     <root level="${LOG_LEVEL}">
         <if condition='"${DEV_MODE}".equals("dev")'>
+            <then>
+                <appender-ref ref="CONSOLE"/>
+                <appender-ref ref="ASYNC_APP_LOG_FILE"/>
+            </then>
+        </if>
+        <if condition='"${DEV_MODE}".equals("local")'>
             <then>
                 <appender-ref ref="CONSOLE"/>
                 <appender-ref ref="ASYNC_APP_LOG_FILE"/>

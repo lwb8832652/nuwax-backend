@@ -80,7 +80,7 @@ spring:
   main:
     allow-circular-references: true
 log:
-  level: DEBUG
+  level: ${LOG_LEVEL:DEBUG}
 
 server:
   port: 8081

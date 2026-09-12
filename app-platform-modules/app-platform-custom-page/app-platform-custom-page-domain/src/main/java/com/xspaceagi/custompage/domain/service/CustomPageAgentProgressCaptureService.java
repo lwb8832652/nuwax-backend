@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xspaceagi.custompage.domain.gateway.PageAppAIClient;
 import com.xspaceagi.custompage.domain.gateway.PageAppFileClient;
+import com.xspaceagi.custompage.domain.threadpool.CustomPageSseProperties;
 import com.xspaceagi.custompage.domain.model.CustomPageConversationModel;
 import com.xspaceagi.custompage.domain.repository.ICustomPageConversationRepository;
 import com.xspaceagi.custompage.domain.util.AgentProgressContextUtil;
@@ -72,6 +73,8 @@ public class CustomPageAgentProgressCaptureService {
     @Resource
     @Qualifier("aiAgentProgressScheduler")
     private ScheduledExecutorService aiAgentProgressScheduler;
+    @Resource
+    private CustomPageSseProperties sseProperties;
 
     /**
      * 前端连接时启动 Agent SSE 采集。
@@ -116,6 +119,7 @@ public class CustomPageAgentProgressCaptureService {
     private SseEmitter attachEmitterToCapture(String sessionId, CaptureContext active) {
         SseEmitter emitter = new SseEmitter(-1L);
         active.emitters.add(emitter);
+        cancelPendingCancel(active);
         replayBufferedEvents(active, emitter);
         registerEmitterCallbacks(sessionId, emitter, active);
         return emitter;
@@ -144,6 +148,7 @@ public class CustomPageAgentProgressCaptureService {
             }
             detachPending.run();
             context.emitters.add(emitter);
+            cancelPendingCancel(context);
             replayBufferedEvents(context, emitter);
             registerEmitterCallbacks(sessionId, emitter, context);
             attached.set(true);
@@ -176,6 +181,7 @@ public class CustomPageAgentProgressCaptureService {
         }
         for (SseEmitter emitter : pending) {
             context.emitters.add(emitter);
+            cancelPendingCancel(context);
             replayBufferedEvents(context, emitter);
             registerEmitterCallbacks(context.sessionId, emitter, context);
         }
@@ -251,10 +257,16 @@ public class CustomPageAgentProgressCaptureService {
 
     private void startAgentSubscription(String sessionId, Long projectId, UserContext userContext,
             String fluxRequestId) {
-        pageAppAIClient.subscribeSessionSse(sessionId, null, projectId, userContext,
+        PageAppAIClient.SseSubscription subscription = pageAppAIClient.subscribeSessionSse(sessionId, null, projectId,
+                userContext,
                 (eventName, data) -> onAgentEvent(sessionId, projectId, eventName, data),
                 () -> onAgentStreamFinished(projectId, fluxRequestId),
                 errorMessage -> onSubscribeFailed(projectId, fluxRequestId, errorMessage));
+        // 保存订阅句柄，供最后一个前端断开后主动取消、释放订阅线程
+        CaptureContext context = activeCaptures.get(buildCaptureKey(projectId, fluxRequestId));
+        if (context != null) {
+            context.subscriptionRef.set(subscription);
+        }
     }
 
     private void onAgentEvent(String sessionId, Long projectId, String eventName, String data) {
@@ -320,6 +332,8 @@ public class CustomPageAgentProgressCaptureService {
         if (activeCaptures.remove(captureKey) == null) {
             return;
         }
+        cancelPendingCancel(context);
+        context.subscriptionRef.set(null);
         sessionStartLocks.remove(captureKey);
         persistAssistantConversation(context, false);
         if (isContextTerminal(context)) {
@@ -443,18 +457,58 @@ public class CustomPageAgentProgressCaptureService {
         return projectId + ":" + fluxRequestId;
     }
 
-    /** 前端连接结束（客户端断开或传输错误）仅移除 emitter，不结束 Agent 订阅与采集。 */
+    /** 前端连接结束（客户端断开或传输错误）后移除 emitter，并在最后一个前端断开时进入取消宽限期。 */
     private void registerEmitterCallbacks(String sessionId, SseEmitter emitter, CaptureContext context) {
         emitter.onCompletion(() -> {
             context.emitters.remove(emitter);
-            log.info("[Agent Progress] frontend SSE disconnected, agent capture continues, session Id={}, request Id={}",
-                    sessionId, context.fluxRequestId);
+            scheduleCancelIfNoViewer(sessionId, context);
         });
         emitter.onError(throwable -> {
             context.emitters.remove(emitter);
-            log.warn("[Agent Progress] frontend SSE error, agent capture continues, session Id={}, request Id={}",
+            scheduleCancelIfNoViewer(sessionId, context);
+            log.warn("[Agent Progress] frontend SSE error, session Id={}, request Id={}",
                     sessionId, context.fluxRequestId, throwable);
         });
+    }
+
+    /**
+     * 所有前端断开后，进入宽限期等待重连；宽限期内有新前端接入则继续采集，超时仍无连接则
+     * 主动取消 Agent 订阅（disconnect 底层连接），使阻塞在读沙箱 SSE 的线程退出、归还线程池。
+     * 用于解决"用户关闭页面后后端订阅仍长期挂着、线程被僵尸会话占用"的问题。
+     */
+    private void scheduleCancelIfNoViewer(String sessionId, CaptureContext context) {
+        if (!context.emitters.isEmpty()) {
+            cancelPendingCancel(context);
+            return;
+        }
+        if (context.cancelTaskRef.get() != null) {
+            return;
+        }
+        log.info("[Agent Progress] all frontend SSE disconnected, schedule cancel after grace period={}s, "
+                + "session Id={}, request Id={}", sseProperties.getDetachGracePeriodSeconds(), sessionId,
+                context.fluxRequestId);
+        ScheduledFuture<?> task = aiAgentProgressScheduler.schedule(() -> {
+            if (!context.emitters.isEmpty()) {
+                // 宽限期内已有新前端接入，取消任务并继续采集
+                context.cancelTaskRef.set(null);
+                return;
+            }
+            PageAppAIClient.SseSubscription subscription = context.subscriptionRef.getAndSet(null);
+            if (subscription != null) {
+                log.info("[Agent Progress] no frontend viewer within grace period, cancel agent subscription, "
+                        + "session Id={}, request Id={}, grace={}s", sessionId, context.fluxRequestId,
+                        sseProperties.getDetachGracePeriodSeconds());
+                subscription.cancel();
+            }
+        }, sseProperties.getDetachGracePeriodSeconds(), TimeUnit.SECONDS);
+        context.cancelTaskRef.set(task);
+    }
+
+    private void cancelPendingCancel(CaptureContext context) {
+        ScheduledFuture<?> task = context.cancelTaskRef.getAndSet(null);
+        if (task != null) {
+            task.cancel(false);
+        }
     }
 
     /** 本轮已从 Agent SSE 收到、尚未推给该前端连接的事件（内存缓冲，非 DB）。 */
@@ -610,6 +664,8 @@ public class CustomPageAgentProgressCaptureService {
         private final Object persistLock = new Object();
         private final List<Map<String, Object>> events = Collections.synchronizedList(new ArrayList<>());
         private final CopyOnWriteArrayList<SseEmitter> emitters = new CopyOnWriteArrayList<>();
+        private final AtomicReference<PageAppAIClient.SseSubscription> subscriptionRef = new AtomicReference<>();
+        private final AtomicReference<ScheduledFuture<?>> cancelTaskRef = new AtomicReference<>();
         private final AtomicReference<String> requestIdRef = new AtomicReference<>();
         private final AtomicReference<Long> assistantRecordIdRef = new AtomicReference<>();
         private final AtomicLong lastPersistAtMs = new AtomicLong(0);

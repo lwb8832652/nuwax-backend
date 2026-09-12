@@ -14,6 +14,7 @@ import jakarta.annotation.Resource;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.time.DateUtils;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.Assert;
 
@@ -33,12 +34,22 @@ public class ConversationDomainServiceImpl implements ConversationDomainService 
     @Resource
     private ConversationMessageRepository conversationMessageRepository;
 
+    /**
+     * 启动时清理"执行中"状态的等待时间（分钟）：只清理超过该时长仍未更新的会话，
+     * 避免多实例部署时误清理其他实例正在执行的会话，0 表示不限制（清理全部）
+     */
+    @Value("${conversation.reset.executing-older-than-minutes:30}")
+    private int resetExecutingOlderThanMinutes;
+
     @PostConstruct
     public void init() {
         // 将正在执行中的会话状态改为已完成，避免服务器重启时状态一直展示执行中
+        // 覆盖全部会话类型（Development/DevDebug 等网页生成会话同样需要清理，否则前端条目会永久冻结在"执行中"）
         LambdaQueryWrapper<Conversation> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(Conversation::getTaskStatus, Conversation.ConversationTaskStatus.EXECUTING);
-        queryWrapper.in(Conversation::getType, Conversation.ConversationType.Chat, Conversation.ConversationType.TempChat);
+        if (resetExecutingOlderThanMinutes > 0) {
+            queryWrapper.lt(Conversation::getModified, new Date(System.currentTimeMillis() - resetExecutingOlderThanMinutes * 60_000L));
+        }
         Conversation conversation = new Conversation();
         conversation.setTaskStatus(Conversation.ConversationTaskStatus.COMPLETE);
         TenantFunctions.callWithIgnoreCheck(() -> conversationRepository.update(conversation, queryWrapper));

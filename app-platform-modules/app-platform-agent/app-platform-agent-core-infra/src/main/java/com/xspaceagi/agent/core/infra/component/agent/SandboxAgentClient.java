@@ -54,6 +54,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
@@ -82,6 +83,48 @@ import java.util.stream.Collectors;
 public class SandboxAgentClient {
 
     private static final CharSequence CONTEXT_LIMIT_REACHED_MSG = "The model has reached its context window limit";
+
+    /**
+     * 单条历史消息进入沙箱上下文的最大字符数，0 表示不限制
+     */
+    @Value("${sandbox.agent.context-max-message-chars:8000}")
+    private int contextMaxMessageChars;
+
+    /**
+     * 沙箱上下文总预算（字符），从最新消息往回累加，超出部分丢弃更早的消息，0 表示不限制
+     */
+    @Value("${sandbox.agent.context-max-total-chars:64000}")
+    private int contextMaxTotalChars;
+
+    /**
+     * 单次沙箱会话允许的最大模型轮次（end_turn 次数），0 表示不限制
+     */
+    @Value("${sandbox.agent.max-turns:200}")
+    private int sandboxAgentMaxTurns;
+
+    /**
+     * 单次沙箱会话允许的最长执行时间（分钟），0 表示不限制
+     */
+    @Value("${sandbox.agent.max-duration-minutes:180}")
+    private int sandboxAgentMaxDurationMinutes;
+
+    /**
+     * 单次会话内存中保留的工具调用条目上限，超出后淘汰最早的已完成条目，0 表示不限制
+     */
+    @Value("${sandbox.agent.max-tool-call-entries:500}")
+    private int maxToolCallEntries;
+
+    /**
+     * 单个工具调用的 rawInput/rawOutput 在内存中保留的最大字符数，0 表示不限制
+     */
+    @Value("${sandbox.agent.max-tool-call-field-chars:32768}")
+    private int maxToolCallFieldChars;
+
+    /**
+     * SSE 连接空闲超时（秒）：超过该时间未收到任何数据则判定连接断开并终止会话
+     */
+    @Value("${sandbox.agent.sse-idle-timeout-seconds:180}")
+    private int sseIdleTimeoutSeconds;
 
     static {
         // disable keep alive, do not use connection pool for now
@@ -612,7 +655,8 @@ public class SandboxAgentClient {
                     }
                     return;
                 }
-                String sessionId0 = jsonObject.getJSONObject("data").getString("session_id");
+                JSONObject sessionData = jsonObject.getJSONObject("data");
+                String sessionId0 = sessionData == null ? null : sessionData.getString("session_id");
                 if (sessionId0 == null) {
                     sink.error(new AgentException("0001", "session_id is null"));
                     return;
@@ -628,13 +672,21 @@ public class SandboxAgentClient {
                 Map<String, ComponentExecutingDto> componentExecutingDtoMap = new LinkedHashMap<>();
                 Set<ComponentExecutingDto.SubEventTypeEnum> subEventTypeEnumSet = new HashSet<>();
                 AtomicBoolean completed = new AtomicBoolean(false);
+                AtomicInteger turnCount = new AtomicInteger(0);
+                long taskStartTime = System.currentTimeMillis();
                 String apiUrl0 = sandboxServer.getServerAgentUrl() + "/computer/progress/" + sessionId0;
                 SseSubscription subscription = subscribe(sandboxServer, rewriteComputerBaseUrl(agentContext.getConversation(), apiUrl0), new SseEventHandler() {
                     @Override
                     public void onEvent(SseEvent event) {
-                        log.debug("sse event, cid {}, type: {}, data: {}", agentContext.getConversationId(), event.type, event.data);
+                        log.debug("sse event, cid {}, type: {}, data: {}", agentContext.getConversationId(), event.type, StringUtils.abbreviate(event.data, 2048));
                         if (agentContext.getIfInterrupted().get()) {
                             chatCancel(agentContext.getConversationId());
+                            return;
+                        }
+                        // 单次会话总时长上限：生成网页这类长任务可能无限循环，必须给一个可配置的刹车
+                        if (sandboxAgentMaxDurationMinutes > 0
+                                && System.currentTimeMillis() - taskStartTime > sandboxAgentMaxDurationMinutes * 60_000L) {
+                            stopSandboxOnLimit(agentContext, "MaxDuration", sink, sseSubscriptionAtomicReference, componentExecutingDtoMap, finalText, completed);
                             return;
                         }
                         String eventData = event.data;
@@ -652,6 +704,12 @@ public class SandboxAgentClient {
                             String reason = "EndTurn";
                             if (data != null && data.getString("reason") != null) {
                                 reason = data.getString("reason");
+                            }
+                            // 轮次上限：一次会话里模型轮次失控时主动终止，而不是一直烧到上下文超限
+                            int turns = turnCount.incrementAndGet();
+                            if (sandboxAgentMaxTurns > 0 && turns >= sandboxAgentMaxTurns) {
+                                stopSandboxOnLimit(agentContext, "MaxTurns", sink, sseSubscriptionAtomicReference, componentExecutingDtoMap, finalText, completed);
+                                return;
                             }
                             sink.next(buildChatFinishedMessage(agentContext, reason));
                             completed.set(true);
@@ -818,7 +876,7 @@ public class SandboxAgentClient {
                             sink.complete();
                         }
                     }
-                });
+                }, sseIdleTimeoutSeconds);
                 sseSubscriptionAtomicReference.set(subscription);
             }).exceptionally(throwable -> {
                 log.error("subscribe error", throwable);
@@ -1029,36 +1087,90 @@ public class SandboxAgentClient {
         return modelConfig.getApiProtocol() == ModelApiProtocolEnum.Anthropic;
     }
 
-    private static void buildContextPrompt(AgentContext agentContext, StringBuilder contextPromptBuilder) {
+    private void buildContextPrompt(AgentContext agentContext, StringBuilder contextPromptBuilder) {
         if (agentContext.getConversation().getSummary() != null) {
             contextPromptBuilder.append("<context-summary>\n");
-            contextPromptBuilder.append(agentContext.getConversation().getSummary()).append("\n</context-summary>\n");
+            contextPromptBuilder.append(truncateText(agentContext.getConversation().getSummary(), contextMaxMessageChars)).append("\n</context-summary>\n");
         }
-        if (CollectionUtils.isNotEmpty(agentContext.getContextMessages())) {
-            contextPromptBuilder.append("<context-message>\n");
-            agentContext.getContextMessages().forEach(message -> {
-                String text = message.getText();
-                if (message.getMessageType() == MessageType.USER) {
-                    text = message.getText().replaceAll("<user-prompt>[\\s\\S]*?</user-prompt>", "")
-                            .replaceAll("<user-reminder>[\\s\\S]*?</user-reminder>", "").trim();
-                    if (text.contains("<user-message>") && text.contains("</user-message>")) {
-                        text = text.replace("<user-message>", "").replace("</user-message>", "").trim();
-                    }
+        var contextMessages = agentContext.getContextMessages();
+        if (CollectionUtils.isEmpty(contextMessages)) {
+            return;
+        }
+        // 从最新消息往回累加：长任务的历史消息可能包含整份文件内容/终端输出，无限拼接会把请求体撑到 MB 级
+        Deque<String> keptMessages = new ArrayDeque<>();
+        int budget = contextMaxTotalChars > 0 ? contextMaxTotalChars : Integer.MAX_VALUE;
+        int omitted = 0;
+        for (int i = contextMessages.size() - 1; i >= 0; i--) {
+            var message = contextMessages.get(i);
+            String text = message.getText();
+            if (text == null) {
+                continue;
+            }
+            if (message.getMessageType() == MessageType.USER) {
+                text = text.replaceAll("<user-prompt>[\\s\\S]*?</user-prompt>", "")
+                        .replaceAll("<user-reminder>[\\s\\S]*?</user-reminder>", "").trim();
+                if (text.contains("<user-message>") && text.contains("</user-message>")) {
+                    text = text.replace("<user-message>", "").replace("</user-message>", "").trim();
                 }
-                contextPromptBuilder.append(message.getMessageType()).append(": ").append(text).append("\n");
-            });
-            contextPromptBuilder.append("\n</context-message>\n");
+            }
+            if (StringUtils.isBlank(text)) {
+                continue;
+            }
+            text = truncateText(text, contextMaxMessageChars);
+            if (text.length() > budget && !keptMessages.isEmpty()) {
+                // 预算不足，丢弃更早的消息，保证最近的上下文完整
+                omitted = i + 1;
+                break;
+            }
+            budget -= text.length();
+            keptMessages.addFirst(message.getMessageType() + ": " + text + "\n");
         }
+        contextPromptBuilder.append("<context-message>\n");
+        if (omitted > 0) {
+            contextPromptBuilder.append("[系统] 已省略更早的 ").append(omitted).append(" 条历史消息\n");
+        }
+        keptMessages.forEach(contextPromptBuilder::append);
+        contextPromptBuilder.append("\n</context-message>\n");
     }
 
-    private static void buildAutoToolCallMessages(AgentContext agentContext, StringBuilder contextPromptBuilder) {
+    private void buildAutoToolCallMessages(AgentContext agentContext, StringBuilder contextPromptBuilder) {
         contextPromptBuilder.append("<reference-information>\n");
         agentContext.getAutoToolCallMessages().forEach(message -> {
             if (message.getMessageType() == MessageType.USER) {
-                contextPromptBuilder.append(message.getText()).append("\n\n");
+                contextPromptBuilder.append(truncateText(message.getText(), contextMaxMessageChars)).append("\n\n");
             }
         });
         contextPromptBuilder.append("\n</reference-information>\n");
+    }
+
+    /**
+     * 截断超长文本，maxLength <= 0 表示不限制
+     */
+    private static String truncateText(String text, int maxLength) {
+        if (text == null || maxLength <= 0 || text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength) + "...[truncated, total " + text.length() + " chars]";
+    }
+
+    /**
+     * 截断超长对象（工具输入/输出），超限时退化为带截断标记的字符串
+     */
+    private Object truncateObject(Object value, int maxLength) {
+        if (value == null || maxLength <= 0) {
+            return value;
+        }
+        if (value instanceof String str) {
+            return truncateText(str, maxLength);
+        }
+        if (value instanceof JSONObject || value instanceof JSONArray) {
+            String json = JSON.toJSONString(value);
+            if (json.length() <= maxLength) {
+                return value;
+            }
+            return json.substring(0, maxLength) + "...[truncated, total " + json.length() + " chars]";
+        }
+        return value;
     }
 
     private static void checkAndCompleteFinalResultFile(AgentContext agentContext, Map<String, ComponentExecutingDto> componentExecutingDtoMap, StringBuilder finalText, FluxSink<CallMessage> sink) {
@@ -1328,7 +1440,7 @@ public class SandboxAgentClient {
         return null;
     }
 
-    private static ComponentExecutingDto buildComponentExecutingDto(JSONObject jsonObject, Map<String, ComponentExecutingDto> componentExecutingDtoMap, Map<String, String> langMap) {
+    private ComponentExecutingDto buildComponentExecutingDto(JSONObject jsonObject, Map<String, ComponentExecutingDto> componentExecutingDtoMap, Map<String, String> langMap) {
         String toolCallId = jsonObject.getString("toolCallId");
         ComponentExecutingDto componentExecutingDto = componentExecutingDtoMap.get(toolCallId);
         ComponentExecuteResult componentExecuteResult;
@@ -1337,6 +1449,7 @@ public class SandboxAgentClient {
             componentExecutingDto.setTargetId(-1L);
             componentExecutingDto.setType(ComponentTypeEnum.ToolCall);
             componentExecutingDtoMap.put(toolCallId, componentExecutingDto);
+            evictComponentExecutingDtoIfNecessary(componentExecutingDtoMap);
             componentExecuteResult = new ComponentExecuteResult();
             componentExecuteResult.setExecuteId(toolCallId);
             componentExecuteResult.setStartTime(System.currentTimeMillis());
@@ -1359,13 +1472,13 @@ public class SandboxAgentClient {
 
         Object rawInput = jsonObject.get("rawInput");
         if (rawInput instanceof JSONObject && !((JSONObject) rawInput).isEmpty()) {
-            componentExecuteResult.setInput(rawInput);
+            componentExecuteResult.setInput(truncateObject(rawInput, maxToolCallFieldChars));
             if (((JSONObject) rawInput).getString("description") != null) {
                 title = ((JSONObject) rawInput).getString("description");
             }
         }
         if (rawInput instanceof JSONArray && !((JSONArray) rawInput).isEmpty()) {
-            componentExecuteResult.setInput(rawInput);
+            componentExecuteResult.setInput(truncateObject(rawInput, maxToolCallFieldChars));
         }
 
         //kind
@@ -1414,10 +1527,10 @@ public class SandboxAgentClient {
 
         if (title != null && (title.startsWith("Write") || title.startsWith("Edit"))) {
             if (componentExecuteResult.getInput() == null) {
-                componentExecuteResult.setInput(jsonObject.get("content"));
+                componentExecuteResult.setInput(truncateObject(jsonObject.get("content"), maxToolCallFieldChars));
             }
             if (jsonObject.get("rawOutput") != null) {
-                componentExecuteResult.setData(jsonObject.get("rawOutput"));
+                componentExecuteResult.setData(truncateObject(jsonObject.get("rawOutput"), maxToolCallFieldChars));
             }
         }
 
@@ -1436,13 +1549,78 @@ public class SandboxAgentClient {
             componentExecuteResult.setSuccess(!"failed".equals(jsonObject.getString("status")));
             componentExecutingDto.setStatus(status.equals("completed") ? ExecuteStatusEnum.FINISHED : ExecuteStatusEnum.FAILED);
             if (jsonObject.get("content") != null) {
-                componentExecuteResult.setData(jsonObject.get("content"));
+                componentExecuteResult.setData(truncateObject(jsonObject.get("content"), maxToolCallFieldChars));
             }
             return componentExecutingDto;
         }
 
         componentExecutingDto.setStatus(ExecuteStatusEnum.EXECUTING);
         return componentExecutingDto;
+    }
+
+    /**
+     * 工具调用条目上限保护：长任务（如生成网页）会产生成百上千个工具调用，
+     * 每个都带 rawInput/rawOutput 全文，无上限驻留会让单次会话内存线性增长。
+     * 优先淘汰已完成的条目，避免影响仍在执行中的工具状态渲染。
+     */
+    private void evictComponentExecutingDtoIfNecessary(Map<String, ComponentExecutingDto> componentExecutingDtoMap) {
+        int maxEntries = maxToolCallEntries;
+        if (maxEntries <= 0 || componentExecutingDtoMap.size() <= maxEntries) {
+            return;
+        }
+        int removable = componentExecutingDtoMap.size() - maxEntries;
+        Iterator<Map.Entry<String, ComponentExecutingDto>> iterator = componentExecutingDtoMap.entrySet().iterator();
+        while (iterator.hasNext() && removable > 0) {
+            ComponentExecutingDto dto = iterator.next().getValue();
+            if (dto.getStatus() != null && dto.getStatus() != ExecuteStatusEnum.EXECUTING) {
+                iterator.remove();
+                removable--;
+            }
+        }
+        if (removable <= 0) {
+            return;
+        }
+        // 极端情况：全部处于执行中，强制淘汰最早的，避免无上限增长
+        log.warn("Tool call entries exceed limit and all are executing, force evicting {} entries, max {}", removable, maxEntries);
+        iterator = componentExecutingDtoMap.entrySet().iterator();
+        while (iterator.hasNext() && removable > 0) {
+            iterator.next();
+            iterator.remove();
+            removable--;
+        }
+    }
+
+    /**
+     * 达到轮次/时长上限时终止沙箱会话：先把未完成的工具调用收尾（避免前端永久"执行中"），
+     * 再停掉沙箱内的 agent（避免孤儿进程继续烧 token），最后显式终止下游流（避免调度任务僵尸 EXECUTING）。
+     */
+    private void stopSandboxOnLimit(AgentContext agentContext, String reason, FluxSink<CallMessage> sink,
+                                    AtomicReference<SseSubscription> sseSubscriptionAtomicReference,
+                                    Map<String, ComponentExecutingDto> componentExecutingDtoMap, StringBuilder finalText,
+                                    AtomicBoolean completed) {
+        log.warn("Sandbox session stopped by limit, cid {}, reason {}", agentContext.getConversationId(), reason);
+        completed.set(true);
+        try {
+            checkUnfinishedToolCall(agentContext, componentExecutingDtoMap);
+            checkAndCompleteFinalResultFile(agentContext, componentExecutingDtoMap, finalText, sink);
+        } catch (Exception e) {
+            log.warn("Failed to complete unfinished tool call, cid {}", agentContext.getConversationId(), e);
+        }
+        try {
+            agentStop(agentContext.getConversationId());
+        } catch (Exception e) {
+            log.warn("agentStop failed, cid {}", agentContext.getConversationId(), e);
+        }
+        try {
+            sink.next(buildChatFinishedMessage(agentContext, reason));
+            sink.complete();
+        } catch (Exception e) {
+            log.warn("Failed to emit limit message, cid {}", agentContext.getConversationId(), e);
+        }
+        SseSubscription sseSubscription = sseSubscriptionAtomicReference.get();
+        if (sseSubscription != null) {
+            sseSubscription.cancel();
+        }
     }
 
     private static String rewriteTitle(String title, JSONObject jsonObject, Map<String, String> langMap) {
@@ -1781,6 +1959,16 @@ public class SandboxAgentClient {
     }
 
     public static SseSubscription subscribe(SandboxServerConfig.SandboxServer sandboxServer, String url, SseEventHandler eventHandler) {
+        return subscribe(sandboxServer, url, eventHandler, 60);
+    }
+
+    /**
+     * 订阅沙箱 SSE 事件流
+     *
+     * @param idleTimeoutSeconds 空闲超时时间（秒）：超过该时间未收到任何数据即判定连接断开并终止会话，<=0 时回退为 60 秒
+     */
+    public static SseSubscription subscribe(SandboxServerConfig.SandboxServer sandboxServer, String url, SseEventHandler eventHandler, int idleTimeoutSeconds) {
+        long idleTimeoutMillis = idleTimeoutSeconds > 0 ? idleTimeoutSeconds * 1000L : 60_000L;
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .header("Accept", "text/event-stream")
@@ -1873,7 +2061,7 @@ public class SandboxAgentClient {
         });
         //心跳检测超时
         Disposable disposable = Flux.interval(Duration.ofSeconds(10), Duration.ofSeconds(10)).takeUntil(aLong -> isFinished.get()).subscribe(ct -> {
-            if (System.currentTimeMillis() - lastTime.get() > 60000) {
+            if (System.currentTimeMillis() - lastTime.get() > idleTimeoutMillis) {
                 isFinished.set(true);
                 log.warn("Heartbeat detection, SSE connection disconnected, url {}", url);
 
@@ -1884,6 +2072,12 @@ public class SandboxAgentClient {
                 }
                 if (subscription.get() != null) {
                     subscription.get().cancel();
+                }
+                // cancel 不会触发 lineSubscriber 的 onError/onComplete，必须显式终止下游，否则 sink 永久挂起（调度任务僵尸 EXECUTING、会话内存泄漏）
+                try {
+                    eventHandler.onError(new TimeoutException("SSE connection idle timeout, no data received for over " + (idleTimeoutMillis / 1000) + "s: " + url));
+                } catch (Exception e) {
+                    // Ignore
                 }
             }
         });
