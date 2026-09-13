@@ -63,6 +63,7 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.metadata.DefaultToolMetadata;
 import org.springframework.beans.BeanUtils;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -102,6 +103,9 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
 
     @Resource
     private RedisUtil redisUtil;
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     @Resource
     private SpaceApplicationService spaceApplicationService;
@@ -155,6 +159,20 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
             modelRepository.save(model);
             modelDto.setId(model.getId());
         }
+        bumpModelListVersion();
+    }
+
+    /**
+     * 模型配置发生变更时递增版本号，用于使「会话可选模型列表」等缓存失效。
+     * 失败仅记录日志，不影响主流程。
+     */
+    private void bumpModelListVersion() {
+        try {
+            Long tenantId = RequestContext.get() != null ? RequestContext.get().getTenantId() : null;
+            stringRedisTemplate.opsForValue().increment("model.list.ver:" + (tenantId == null ? "na" : tenantId));
+        } catch (Exception e) {
+            log.warn("bump model list version failed", e);
+        }
     }
 
     @Override
@@ -186,6 +204,7 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
                     userContext
             );
         }
+        bumpModelListVersion();
     }
 
     @Override
@@ -195,10 +214,16 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
             throw BizException.of(ErrorCodeEnum.INVALID_PARAM, BizExceptionCodeEnum.agentDefaultModelDeleteForbidden);
         }
         modelRepository.removeById(modelId);
+        bumpModelListVersion();
     }
 
     @Override
     public List<ModelConfigDto> queryModelConfigList(ModelQueryDto modelQueryDto) {
+        return queryModelConfigList(modelQueryDto, true);
+    }
+
+    @Override
+    public List<ModelConfigDto> queryModelConfigList(ModelQueryDto modelQueryDto, boolean withCreator) {
         LambdaQueryWrapper<ModelConfig> queryWrapper = new LambdaQueryWrapper<>();
         ModelConfig model = new ModelConfig();
         model.setApiProtocol(modelQueryDto.getApiProtocol());
@@ -215,17 +240,17 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
         List<ModelConfigDto> modelList;
         if (modelQueryDto.getScope() == null) {
             model.setScope(ModelConfig.ModelScopeEnum.Tenant);
-            modelList = queryModelConfigList(queryWrapper);
+            modelList = queryModelConfigList(queryWrapper, withCreator);
 
             // Query models under space, place them at the front of the list
             if (modelQueryDto.getSpaceId() != null) {
                 model.setSpaceId(modelQueryDto.getSpaceId());
                 model.setScope(ModelConfig.ModelScopeEnum.Space);
-                modelList.addAll(0, queryModelConfigList(queryWrapper));
+                modelList.addAll(0, queryModelConfigList(queryWrapper, withCreator));
             }
         } else {
             model.setSpaceId(modelQueryDto.getSpaceId());
-            modelList = queryModelConfigList(queryWrapper);
+            modelList = queryModelConfigList(queryWrapper, withCreator);
         }
         if (RequestContext.get() != null && RequestContext.get().getUserId() != null) {
             UserDataPermissionDto userDataPermission = userDataPermissionRpcService.getUserDataPermission(RequestContext.get().getUserId());
@@ -253,12 +278,24 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
 
     @Override
     public ModelConfigDto queryModelConfigById(Long modelId) {
+        return queryModelConfigById(modelId, true);
+    }
+
+    @Override
+    public ModelConfigDto queryModelConfigById(Long modelId, boolean withCreator) {
         ModelConfig model = modelRepository.getById(modelId);
         if (model == null) {
             return null;
         }
         ModelConfigDto modelDto = convertToModelDto(model);
-        completeCreator(List.of(modelDto));
+        if (withCreator) {
+            completeCreator(List.of(modelDto));
+        } else {
+            // 调用方不展示创建人：跳过用户表查询，并直接置空，避免依赖调用方事后清理
+            modelDto.setCreatorId(null);
+            modelDto.setCreator(null);
+            modelDto.setApiInfoList(null);
+        }
         return modelDto;
     }
 
@@ -361,11 +398,23 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
     }
 
     private List<ModelConfigDto> queryModelConfigList(LambdaQueryWrapper<ModelConfig> queryWrapper) {
+        return queryModelConfigList(queryWrapper, true);
+    }
+
+    private List<ModelConfigDto> queryModelConfigList(LambdaQueryWrapper<ModelConfig> queryWrapper, boolean withCreator) {
         queryWrapper.orderByAsc(ModelConfig::getSort).orderByDesc(ModelConfig::getCreated);
         List<ModelConfigDto> modelDtos = new ArrayList<>();
         modelRepository.list(queryWrapper).forEach(model1 -> modelDtos.add(convertToModelDto(model1)));
-        // creatorIdList in modelDtos
-        completeCreator(modelDtos);
+        if (withCreator) {
+            // creatorIdList in modelDtos
+            completeCreator(modelDtos);
+        } else {
+            // 调用方不展示创建人：跳过用户表查询，并直接置空，避免依赖调用方事后清理
+            modelDtos.forEach(modelDto -> {
+                modelDto.setCreatorId(null);
+                modelDto.setCreator(null);
+            });
+        }
         modelDtos.forEach(modelDto -> modelDto.setApiInfoList(null));
         return modelDtos;
     }
@@ -683,5 +732,6 @@ public class ModelApplicationServiceImpl implements ModelApplicationService {
             return model;
         }).collect(Collectors.toList());
         modelRepository.updateBatchById(modelConfigs);
+        bumpModelListVersion();
     }
 }

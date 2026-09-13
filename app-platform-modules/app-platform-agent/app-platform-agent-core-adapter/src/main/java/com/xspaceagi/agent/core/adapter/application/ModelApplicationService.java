@@ -46,6 +46,14 @@ public interface ModelApplicationService {
     List<ModelConfigDto> queryModelConfigList(ModelQueryDto modelQueryDto);
 
     /**
+     * 查询可使用的模型列表
+     *
+     * @param withCreator 是否补全创建人信息（false 时不查询用户表，且 creator/creatorId 置空，
+     *                    供返回前本就不展示创建人的调用方使用，如会话可选模型列表）
+     */
+    List<ModelConfigDto> queryModelConfigList(ModelQueryDto modelQueryDto, boolean withCreator);
+
+    /**
      * 获取商家全局模型
      *
      * @return
@@ -59,6 +67,14 @@ public interface ModelApplicationService {
      * @return
      */
     ModelConfigDto queryModelConfigById(Long modelId);
+
+    /**
+     * 根据ID查询模型配置
+     *
+     * @param withCreator 是否补全创建人信息（false 时不查询用户表，且 creator/creatorId/apiInfoList 置空，
+     *                    供返回前本就不展示创建人的调用方使用，如会话可选模型列表）
+     */
+    ModelConfigDto queryModelConfigById(Long modelId, boolean withCreator);
 
     List<ModelConfigDto> queryModelConfigListByIds(List<Long> modelIds);
 

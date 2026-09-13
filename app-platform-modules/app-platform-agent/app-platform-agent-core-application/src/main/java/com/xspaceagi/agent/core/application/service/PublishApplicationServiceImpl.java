@@ -539,6 +539,27 @@ public class PublishApplicationServiceImpl implements PublishApplicationService 
     }
 
     @Override
+    public String queryPublishedConfig(Published.TargetType targetType, Long targetId) {
+        if (targetId == null) {
+            return null;
+        }
+        List<Published> publishedList = publishDomainService.queryPublishedList(targetType, List.of(targetId));
+        if (CollectionUtils.isEmpty(publishedList)) {
+            return null;
+        }
+        // scope 优先级与 queryPublished 保持一致：Global、Tenant、Space，取优先级最高一条的 config
+        publishedList.sort(Comparator.comparing(published -> {
+            Published.PublishScope scope = published.getScope();
+            return switch (scope) {
+                case Global -> 0;
+                case Tenant -> 1;
+                case Space -> 2;
+            };
+        }));
+        return publishedList.get(0).getConfig();
+    }
+
+    @Override
     public PublishedDto queryPublishedWithSpaceId(Published.TargetType targetType, Long targetId, Long spaceId) {
         PublishedDto published = queryPublished(targetType, targetId);
         if (published == null) {

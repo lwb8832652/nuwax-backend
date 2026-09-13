@@ -38,6 +38,12 @@ public interface PublishApplicationService {
 
     PublishedDto queryPublished(Published.TargetType targetType, Long targetId, boolean loadConfig);
 
+    /**
+     * 仅查询已发布目标的 config（不加载统计/收藏/发布者信息，不触发用户表查询），
+     * 供只需要配置内容的调用方使用（如会话可选模型列表）
+     */
+    String queryPublishedConfig(Published.TargetType targetType, Long targetId);
+
     PublishedDto queryPublishedWithSpaceId(Published.TargetType targetType, Long targetId, Long spaceId);
 
     /**

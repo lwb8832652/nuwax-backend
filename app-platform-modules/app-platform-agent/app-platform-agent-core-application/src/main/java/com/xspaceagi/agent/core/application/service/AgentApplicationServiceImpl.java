@@ -81,8 +81,10 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.Assert;
+import org.springframework.util.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -94,11 +96,18 @@ import java.util.stream.Collectors;
 public class AgentApplicationServiceImpl implements AgentApplicationService {
 
     private static final Integer MAX_QUERY_SIZE = 1000;
+
+    /** 会话可选模型列表结果缓存 TTL（秒），任一输入变化（模型增删改/发布配置/已选模型）即失效 */
+    private static final long MODEL_OPTIONS_CACHE_TTL_SECONDS = 60;
+
     @Resource
     private AgentDomainService agentDomainService;
 
     @Resource
     private ModelApplicationService modelApplicationService;
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     @Resource
     private UserApplicationService userApplicationService;
@@ -2376,14 +2385,32 @@ public class AgentApplicationServiceImpl implements AgentApplicationService {
 
     @Override
     public List<ModelConfigDto> queryUserCanSelectModelListForAgent(Long userId, Long agentId) {
-        PublishedDto agentPublished = publishApplicationService.queryPublished(Published.TargetType.Agent, agentId);
-        if (agentPublished == null) {
+        // 只需要 config，走轻量查询，不加载统计/收藏/发布者信息
+        String publishedConfig = publishApplicationService.queryPublishedConfig(Published.TargetType.Agent, agentId);
+        if (publishedConfig == null) {
             return List.of();
         }
 
-        AgentConfigDto agentConfigDto = JSON.parseObject(agentPublished.getConfig(), AgentConfigDto.class);
+        AgentConfigDto agentConfigDto = JSON.parseObject(publishedConfig, AgentConfigDto.class);
         if (agentConfigDto == null || agentConfigDto.getAllowOtherModel() == null || !agentConfigDto.getAllowOtherModel().equals(YesOrNoEnum.Y.getKey())) {
             return List.of();
+        }
+
+        // 结果缓存：key 由 租户/用户/智能体/已选模型/发布配置指纹/模型列表版本 组成，任一变化即失效。
+        // 提前读取已选模型（原本在方法末尾读，用于排序），同时作为缓存 key 的一部分保证排序正确性。
+        Object selectedVal = redisUtil.get("agent.model.selected:" + userId + ":" + agentConfigDto.getId());
+        String selectedSuffix = selectedVal == null ? "none" : selectedVal.toString();
+        String cacheKey = buildModelOptionsCacheKey(userId, agentId, publishedConfig, selectedSuffix);
+        try {
+            String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+            if (cached != null) {
+                List<ModelConfigDto> cachedList = JSON.parseArray(cached, ModelConfigDto.class);
+                if (cachedList != null) {
+                    return cachedList;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("read model options cache failed, key={}", cacheKey, e);
         }
 
         List<SpaceDto> spaces = spaceApplicationService.queryListByUserId(userId);
@@ -2398,7 +2425,8 @@ public class AgentApplicationServiceImpl implements AgentApplicationService {
             modelQueryDto.setModelType(ModelTypeEnum.Chat);
             modelQueryDto.setSpaceId(space.getId());
             modelQueryDto.setEnabled(YesOrNoEnum.Y.getKey());
-            modelConfigDtos.addAll(modelApplicationService.queryModelConfigList(modelQueryDto));
+            // 返回前不展示创建人，withCreator=false 跳过用户表查询
+            modelConfigDtos.addAll(modelApplicationService.queryModelConfigList(modelQueryDto, false));
             modelConfigDtos.removeIf(modelConfigDto -> !modelConfigDto.getUsageScenarios().contains(UsageScenarioEnum.fromString(agentConfigDto.getType())));
             modelConfigDtos.forEach(modelConfigDto -> {
                 modelConfigDto.setApiInfoList(null);
@@ -2412,7 +2440,7 @@ public class AgentApplicationServiceImpl implements AgentApplicationService {
             firstModelId = componentConfigDto.getTargetId();
             //判断modelConfigDtos中是否包含componentConfigDto.getTargetId()
             if (modelConfigDtos.stream().noneMatch(modelConfigDto -> modelConfigDto.getId().equals(componentConfigDto.getTargetId()))) {
-                ModelConfigDto modelConfigDto = modelApplicationService.queryModelConfigById(componentConfigDto.getTargetId());
+                ModelConfigDto modelConfigDto = modelApplicationService.queryModelConfigById(componentConfigDto.getTargetId(), false);
                 if (modelConfigDto != null) {
                     modelConfigDto.setApiInfoList(null);
                     modelConfigDto.setCreatorId(null);
@@ -2421,10 +2449,9 @@ public class AgentApplicationServiceImpl implements AgentApplicationService {
                 }
             }
         }
-        Object val = redisUtil.get("agent.model.selected:" + userId + ":" + agentConfigDto.getId());
-        if (val != null) {
+        if (selectedVal != null) {
             try {
-                firstModelId = Long.parseLong(val.toString());
+                firstModelId = Long.parseLong(selectedVal.toString());
             } catch (NumberFormatException ignored) {
             }
         }
@@ -2437,7 +2464,31 @@ public class AgentApplicationServiceImpl implements AgentApplicationService {
                 modelConfigDtos.add(0, modelConfigDto1);
             }
         }
+        try {
+            stringRedisTemplate.opsForValue().set(cacheKey, JSON.toJSONString(modelConfigDtos), Duration.ofSeconds(MODEL_OPTIONS_CACHE_TTL_SECONDS));
+        } catch (Exception e) {
+            log.warn("write model options cache failed, key={}", cacheKey, e);
+        }
         return modelConfigDtos;
+    }
+
+    /**
+     * 构建会话可选模型列表的缓存 key：
+     * agent.model.options:{tenantId}:{userId}:{agentId}:{selectedModel}:{configFingerprint}:{modelListVersion}
+     * - configFingerprint：发布配置的 MD5，智能体重新发布后自动失效，无需额外失效钩子
+     * - modelListVersion：模型增删改/排序/访问控制变更时递增（见 ModelApplicationServiceImpl#bumpModelListVersion）
+     */
+    private String buildModelOptionsCacheKey(Long userId, Long agentId, String publishedConfig, String selectedSuffix) {
+        Long tenantId = RequestContext.get() != null ? RequestContext.get().getTenantId() : null;
+        String tenantSuffix = tenantId == null ? "na" : tenantId.toString();
+        String configFingerprint = DigestUtils.md5DigestAsHex(publishedConfig.getBytes(StandardCharsets.UTF_8));
+        String modelVer;
+        try {
+            modelVer = stringRedisTemplate.opsForValue().get("model.list.ver:" + tenantSuffix);
+        } catch (Exception e) {
+            modelVer = null;
+        }
+        return "agent.model.options:" + tenantSuffix + ":" + userId + ":" + agentId + ":" + selectedSuffix + ":" + configFingerprint + ":" + (modelVer == null ? "0" : modelVer);
     }
 
     @Override
