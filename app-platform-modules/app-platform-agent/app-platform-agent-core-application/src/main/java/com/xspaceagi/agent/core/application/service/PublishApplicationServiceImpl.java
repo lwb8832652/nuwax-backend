@@ -560,6 +560,14 @@ public class PublishApplicationServiceImpl implements PublishApplicationService 
     }
 
     @Override
+    public boolean isPublished(Published.TargetType targetType, Long targetId) {
+        if (targetId == null) {
+            return false;
+        }
+        return CollectionUtils.isNotEmpty(publishDomainService.queryPublishedList(targetType, List.of(targetId)));
+    }
+
+    @Override
     public PublishedDto queryPublishedWithSpaceId(Published.TargetType targetType, Long targetId, Long spaceId) {
         PublishedDto published = queryPublished(targetType, targetId);
         if (published == null) {

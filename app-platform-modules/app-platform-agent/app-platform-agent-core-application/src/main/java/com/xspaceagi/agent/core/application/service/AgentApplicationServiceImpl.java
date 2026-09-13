@@ -586,6 +586,23 @@ public class AgentApplicationServiceImpl implements AgentApplicationService {
     }
 
     @Override
+    public AgentConfigDto queryAgentMeta(Long agentId) {
+        AgentConfig agentConfig = agentDomainService.queryById(agentId);
+        if (agentConfig == null) {
+            return null;
+        }
+        AgentConfigDto agentConfigDto = new AgentConfigDto();
+        agentConfigDto.setId(agentConfig.getId());
+        agentConfigDto.setSpaceId(agentConfig.getSpaceId());
+        agentConfigDto.setModified(agentConfig.getModified());
+        agentConfigDto.setDevAgentConversationId(agentConfig.getDevAgentConversationId());
+        if (agentConfig.getExtra() != null && JSON.isValidObject(agentConfig.getExtra())) {
+            agentConfigDto.setExtra(JSON.parseObject(agentConfig.getExtra(), Map.class));
+        }
+        return agentConfigDto;
+    }
+
+    @Override
     public AgentConfigDto queryByUid(String agentUid) {
         AgentConfig agentConfig = agentDomainService.queryByUid(agentUid);
         if (agentConfig != null) {

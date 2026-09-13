@@ -84,6 +84,12 @@ public interface AgentApplicationService {
      */
     AgentConfigDto queryById(Long agentId);
 
+    /**
+     * 轻量查询智能体元信息（id/spaceId/extra/devAgentConversationId/modified），
+     * 不展开组件配置、不查询发布信息，供只需要存在性判断或少量字段的调用方使用（如创建会话）
+     */
+    AgentConfigDto queryAgentMeta(Long agentId);
+
     AgentConfigDto queryByUid(String agentUid);
 
     AgentConfigDto queryAgentByIdWithStatics(Long agentId);

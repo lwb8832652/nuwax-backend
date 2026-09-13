@@ -44,6 +44,12 @@ public interface PublishApplicationService {
      */
     String queryPublishedConfig(Published.TargetType targetType, Long targetId);
 
+    /**
+     * 判断目标是否已发布（published 行存在即视为已发布，与 queryPublished 非空判断等价），
+     * 不加载 config/统计/收藏/发布者信息
+     */
+    boolean isPublished(Published.TargetType targetType, Long targetId);
+
     PublishedDto queryPublishedWithSpaceId(Published.TargetType targetType, Long targetId, Long spaceId);
 
     /**

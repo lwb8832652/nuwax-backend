@@ -280,7 +280,9 @@ public class ConversationApplicationServiceImpl extends AbstractTaskExecuteServi
 
     @Override
     public ConversationDto createConversation(Long userId, Long agentId, boolean devMode, boolean tempChat, Map<String, Object> variables) {
-        AgentConfigDto agentConfigDto = agentApplicationService.queryById(agentId);
+        // 只需要存在性判断与少量元信息（extra/devAgentConversationId/modified 仅 devMode 使用），
+        // 不再全量加载组件配置，避免组件级 queryPublished 循环
+        AgentConfigDto agentConfigDto = agentApplicationService.queryAgentMeta(agentId);
         if (agentConfigDto == null) {
             throw BizException.of(ErrorCodeEnum.INVALID_PARAM, BizExceptionCodeEnum.agentSelectedNotFound);
         }

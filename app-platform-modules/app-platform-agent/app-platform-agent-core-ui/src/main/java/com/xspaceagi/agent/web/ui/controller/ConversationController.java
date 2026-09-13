@@ -107,14 +107,15 @@ public class ConversationController {
     @RequestMapping(path = "/create", method = RequestMethod.POST)
     public ReqResult<ConversationDto> create(@RequestBody ConversationCreateDto conversationCreateDto) {
         if (conversationCreateDto.isDevMode()) {
-            AgentConfigDto agentConfigDto = agentApplicationService.queryById(conversationCreateDto.getAgentId());
+            // 只需要存在性判断与 spaceId，走轻量元信息查询
+            AgentConfigDto agentConfigDto = agentApplicationService.queryAgentMeta(conversationCreateDto.getAgentId());
             if (agentConfigDto == null) {
                 return ReqResult.error("Agent not found");
             }
             spacePermissionService.checkSpaceUserPermission(agentConfigDto.getSpaceId());
         } else {
-            PublishedDto publishedDto = publishApplicationService.queryPublished(Published.TargetType.Agent, conversationCreateDto.getAgentId());
-            if (publishedDto == null) {
+            // 只需要判断是否已发布，走轻量查询
+            if (!publishApplicationService.isPublished(Published.TargetType.Agent, conversationCreateDto.getAgentId())) {
                 return ReqResult.error("Agent not found or has been unpublished");
             }
             PublishedPermissionDto publishedPermissionDto = publishApplicationService.hasPermission(Published.TargetType.Agent, conversationCreateDto.getAgentId());
