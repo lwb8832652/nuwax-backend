@@ -46,6 +46,12 @@ public interface PluginDomainService {
      */
     List<PluginConfig> queryListBySpaceId(Long spaceId);
 
+    /**
+     * 根据空间ID查询插件列表（不查 config 列，供不需要插件配置内容的列表场景使用，
+     * 可避免大字段传输；返回实体的 config 为 null）
+     */
+    List<PluginConfig> queryListBySpaceIdWithoutConfig(Long spaceId);
+
 
     /**
      * 复制

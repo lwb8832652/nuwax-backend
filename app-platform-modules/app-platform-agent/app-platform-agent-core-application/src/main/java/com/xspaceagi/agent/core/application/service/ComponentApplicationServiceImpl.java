@@ -76,7 +76,8 @@ public class ComponentApplicationServiceImpl implements ComponentApplicationServ
         }
 
         if (types == null || types.contains(Published.TargetType.Plugin)) {
-            List<PluginDto> pluginDtos = pluginApplicationService.queryListBySpaceId(spaceId);
+            // 组件列表不消费插件 config 内容，走轻量查询避免 config 大字段传输与解析
+            List<PluginDto> pluginDtos = pluginApplicationService.queryListBySpaceIdWithoutConfig(spaceId);
             pluginDtos.forEach(pluginDto -> {
                 ComponentDto componentDto = new ComponentDto();
                 BeanUtils.copyProperties(pluginDto, componentDto);

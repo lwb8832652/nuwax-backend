@@ -72,6 +72,15 @@ public class PluginDomainServiceImpl implements PluginDomainService {
     }
 
     @Override
+    public List<PluginConfig> queryListBySpaceIdWithoutConfig(Long spaceId) {
+        LambdaQueryWrapper<PluginConfig> queryWrapper = new LambdaQueryWrapper<>();
+        // 排除 config 大字段列（与 Published/Skill 的用法一致），列表场景不传输不解析
+        queryWrapper.select(PluginConfig.class, info -> !"config".equals(info.getColumn()));
+        queryWrapper.eq(PluginConfig::getSpaceId, spaceId);
+        return pluginConfigRepository.list(queryWrapper);
+    }
+
+    @Override
     public Long copy(Long userId, Long pluginId) {
         PluginConfig pluginConfig = queryById(pluginId);
         if (pluginConfig == null) {

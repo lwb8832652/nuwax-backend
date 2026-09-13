@@ -287,6 +287,19 @@ public class PluginApplicationServiceImpl implements PluginApplicationService {
         return pluginDtos;
     }
 
+    @Override
+    public List<PluginDto> queryListBySpaceIdWithoutConfig(Long spaceId) {
+        List<PluginConfig> pluginConfigs = pluginDomainService.queryListBySpaceIdWithoutConfig(spaceId);
+        // 不解析 config：组件列表等调用方不消费该字段，其余字段转换与 queryListBySpaceId 完全一致
+        List<PluginDto> pluginDtos = pluginConfigs.stream().map(pluginConfig -> {
+            PluginDto pluginDto = new PluginDto();
+            BeanUtils.copyProperties(pluginConfig, pluginDto);
+            return pluginDto;
+        }).collect(Collectors.toList());
+        completeCreator(pluginDtos);
+        return pluginDtos;
+    }
+
     private void completeCreator(List<PluginDto> pluginDtos) {
         Map<Long, UserDto> userMap = userApplicationService.queryUserListByIds(pluginDtos.stream().map(PluginDto::getCreatorId).collect(Collectors.toList()))
                 .stream().collect(Collectors.toMap(UserDto::getId, userDto -> userDto));

@@ -49,6 +49,12 @@ public interface PluginApplicationService {
     List<PluginDto> queryListBySpaceId(Long spaceId);
 
     /**
+     * 查询空间下的插件列表（轻量：不加载不解析 config，PluginDto.config 为 null），
+     * 供不需要插件配置内容的列表场景使用（如组件库列表）
+     */
+    List<PluginDto> queryListBySpaceIdWithoutConfig(Long spaceId);
+
+    /**
      * 根据ID获取插件列表
      *
      * @return
